@@ -1,8 +1,13 @@
+mod hw_device;
+mod player;
+
 use anyhow::{Context, Result, anyhow};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use dashmap::DashMap;
+use hw_device::HwDevice;
 use lazy_static::lazy_static;
+use player::UUAVPlayer;
 use std::{
     ffi::{CStr, CString},
     os::raw::{c_char, c_void},
@@ -16,19 +21,16 @@ lazy_static! {
     //static ref DATA_CHANNELS: DashMap<u64, (Sender<Vec<f32>>, Receiver<Vec<f32>>)> = DashMap::new();
 }
 
-struct UUAVPlayer {
+struct Runtime {
     device: HwDevice,
+    error_callback: ErrorCallback,
+    audio_options: ArcSwap<AudioOptions>,
+    registry: DashMap<PlayerId, UUAVPlayer>,
 }
 
-unsafe impl Send for UUAVPlayer {}
-unsafe impl Sync for UUAVPlayer {}
+pub type ErrorCallback = extern "C" fn(*const c_char);
 
-impl Drop for UUAVPlayer {
-    fn drop(&mut self) {
-        //void        uuav_player_free(UUAVPlayer* p);            // [main] joins decoder thread; see shutdown note
-        todo!()
-    }
-}
+pub type PlayerId = u64;
 
 #[allow(non_camel_case_types)]
 #[repr(C)]
@@ -43,100 +45,6 @@ pub enum UUAVState {
     UUAV_ERROR,
     UUAV_UNKNOWN,
 }
-
-impl UUAVPlayer {
-    fn new(device: HwDevice) -> Self {
-        // TODO initialisation?
-        todo!();
-
-        Self { device }
-    }
-
-    // not blocking
-    // async, returns immidieatly
-    fn open_media_intent(&mut self, url: String) -> anyhow::Result<()> {
-        todo!();
-    }
-
-    fn close_media(&mut self) -> anyhow::Result<()> {
-        todo!();
-    }
-
-    fn play(&self) -> anyhow::Result<()> {
-        todo!();
-    }
-
-    fn pause(&self) -> anyhow::Result<()> {
-        todo!();
-    }
-
-    // not blocking
-    fn seek_intent(&self, time: f64) -> anyhow::Result<()> {
-        todo!()
-    }
-
-    fn state(&self) -> UUAVState {
-        todo!();
-    }
-
-    fn duration(&self) -> anyhow::Result<Option<f64>> {
-        todo!()
-    }
-
-    fn current_time(&self) -> anyhow::Result<Option<f64>> {
-        todo!()
-    }
-
-    // the player slaves its playback to the externally provided master clock
-    fn assign_current_master_clock(&self, time: f64) -> anyhow::Result<()> {
-        todo!()
-    }
-
-    fn video_size() -> anyhow::Result<Option<VideoSize>> {
-        todo!()
-    }
-
-    // TODO> Who notifies the consumer about recreation? What is the lifetime of the previous texture?
-    // SRV: plane 0 = Y, 1 = UV; valid from READY; recreated on resolution change
-    fn video_texture(&self, plane: i32) -> anyhow::Result<*const c_void> {
-        todo!()
-    }
-
-    // fills interleaved FLT; pads silence on underrun,
-    // never blocks; returns frames actually copied
-    fn read_audio(&self, dst: *mut f32, nb_frames: i32) -> i32 {
-        todo!()
-    }
-}
-
-// Is guaranteed to live the whole lifecycle of the app, static lifetime
-// D3D or Metal device
-#[derive(Clone, Copy)]
-struct HwDevice {
-    // is passed from the master flow and remains valid for the whole
-    // lifetime of the app
-    raw_device: *const c_void,
-}
-
-unsafe impl Send for HwDevice {}
-unsafe impl Sync for HwDevice {}
-
-impl HwDevice {
-    fn from_raw(raw_device: *const c_void) -> Self {
-        Self { raw_device }
-    }
-}
-
-struct Runtime {
-    device: HwDevice,
-    error_callback: ErrorCallback,
-    audio_options: ArcSwap<AudioOptions>,
-    registry: DashMap<PlayerId, UUAVPlayer>,
-}
-
-pub type ErrorCallback = extern "C" fn(*const c_char);
-
-pub type PlayerId = u64;
 
 #[repr(C)]
 #[derive(Default)]
@@ -477,9 +385,9 @@ pub unsafe extern "C" fn uuav_player_current_time(
 
 // the player slaves its playback to the externally provided master clock
 #[unsafe(no_mangle)]
-pub extern "C" fn uuav_player_assign_current_master_clock(
+pub extern "C" fn uuav_player_assign_master_clock(
     player_id: PlayerId,
-    time: f64,
+    current_time: f64,
 ) -> ResultFFI {
     let state = INIT_STATE.load();
     let Some(state) = state.as_ref() else {
@@ -490,7 +398,7 @@ pub extern "C" fn uuav_player_assign_current_master_clock(
         return ResultFFI::error("player with specific id not found");
     };
 
-    player.assign_current_master_clock(time).into()
+    player.assign_master_clock(current_time).into()
 }
 
 // valid from READY
