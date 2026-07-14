@@ -44,6 +44,63 @@ pub(crate) const fn q2d(r: ff::AVRational) -> f64 {
     }
 }
 
+/// Non-owning view of an `AVStream` belonging to a live format context.
+#[derive(Clone, Copy)]
+pub(crate) struct Stream(*mut ff::AVStream);
+
+impl Stream {
+    /// # Safety
+    /// `ptr` must point to a stream of a live `AVFormatContext`, and the
+    /// view must not outlive that context.
+    pub(crate) const unsafe fn from_raw(ptr: *mut ff::AVStream) -> Self {
+        Self(ptr)
+    }
+
+    pub(crate) fn codecpar(self) -> *const ff::AVCodecParameters {
+        unsafe { (*self.0).codecpar }
+    }
+
+    pub(crate) fn codec_id(self) -> ff::AVCodecID {
+        unsafe { (*self.codecpar()).codec_id }
+    }
+
+    pub(crate) fn time_base(self) -> ff::AVRational {
+        unsafe { (*self.0).time_base }
+    }
+
+    pub(crate) fn find_decoder(self) -> Result<*const ff::AVCodec> {
+        let codec = unsafe { ff::avcodec_find_decoder(self.codec_id()) };
+        if codec.is_null() {
+            return Err(anyhow!("no decoder for codec id {:?}", self.codec_id()));
+        }
+        Ok(codec)
+    }
+}
+
+/// Owning wrapper around an `AVCodecContext`.
+pub(crate) struct OwnedDecoder(*mut ff::AVCodecContext);
+
+impl OwnedDecoder {
+    pub(crate) fn new(codec: *const ff::AVCodec) -> Result<Self> {
+        let ptr = unsafe { ff::avcodec_alloc_context3(codec) };
+        if ptr.is_null() {
+            return Err(anyhow!("avcodec_alloc_context3 failed"));
+        }
+        Ok(Self(ptr))
+    }
+
+    #[allow(clippy::needless_pass_by_ref_mut)] // hands out a mutable alias
+    pub(crate) const fn as_mut_ptr(&mut self) -> *mut ff::AVCodecContext {
+        self.0
+    }
+}
+
+impl Drop for OwnedDecoder {
+    fn drop(&mut self) {
+        unsafe { ff::avcodec_free_context(&mut self.0) };
+    }
+}
+
 /// Owning wrapper around an `AVFrame`.
 ///
 /// The frame's data buffers are reference counted by FFmpeg, so moving the
