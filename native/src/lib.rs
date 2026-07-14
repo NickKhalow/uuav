@@ -91,8 +91,8 @@ pub struct Status {
 #[repr(C)]
 #[derive(Default, Clone)]
 pub struct AudioOptions {
-    pub sample_rate: u32,
-    pub channels: u32,
+    pub sample_rate: i32,
+    pub channels: i32,
 }
 
 #[repr(C)]
