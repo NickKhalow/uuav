@@ -5,6 +5,11 @@ use ffmpeg_sys_next as ff;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 
+/// "Decoder needs more input" return code. FFmpeg has no named define for
+/// it: the C API spells it `AVERROR(EAGAIN)`, with `EAGAIN` coming from the
+/// platform's errno, so the bindings can only offer the same composition.
+pub(crate) const AVERROR_EAGAIN: c_int = ff::AVERROR(libc::EAGAIN);
+
 /// Outcome of a receive call on a decoder.
 pub(crate) enum Decoded<T> {
     Frame(T),
@@ -118,13 +123,67 @@ impl OwnedFrame {
         Ok(Self(ptr))
     }
 
-    pub(crate) const fn as_ptr(&self) -> *const ff::AVFrame {
-        self.0
-    }
-
     #[allow(clippy::needless_pass_by_ref_mut)] // hands out a mutable alias
     pub(crate) const fn as_mut_ptr(&mut self) -> *mut ff::AVFrame {
         self.0
+    }
+
+    /// Pixel format for video frames, sample format for audio frames.
+    pub(crate) fn format(&self) -> c_int {
+        unsafe { (*self.0).format }
+    }
+
+    pub(crate) fn width(&self) -> c_int {
+        unsafe { (*self.0).width }
+    }
+
+    pub(crate) fn height(&self) -> c_int {
+        unsafe { (*self.0).height }
+    }
+
+    pub(crate) fn best_effort_timestamp(&self) -> i64 {
+        unsafe { (*self.0).best_effort_timestamp }
+    }
+
+    pub(crate) fn sample_rate(&self) -> c_int {
+        unsafe { (*self.0).sample_rate }
+    }
+
+    pub(crate) fn nb_samples(&self) -> c_int {
+        unsafe { (*self.0).nb_samples }
+    }
+
+    /// Channel layout of an audio frame.
+    pub(crate) fn ch_layout(&self) -> &ff::AVChannelLayout {
+        unsafe { &(*self.0).ch_layout }
+    }
+
+    /// Plane pointers of an audio frame, in the shape `swr_convert` takes.
+    pub(crate) fn extended_data(&self) -> *const *const u8 {
+        unsafe { (*self.0).extended_data.cast::<*const u8>().cast_const() }
+    }
+
+    /// Data pointer of one plane; null for planes past
+    /// `AV_NUM_DATA_POINTERS`. Hardware frames repurpose the planes (for
+    /// D3D11: 0 is the texture, 1 the array slice index).
+    pub(crate) fn data(&self, plane: usize) -> *mut u8 {
+        // copies only the 8-byte plane pointer, never the plane contents
+        match unsafe { (*self.0).data.get(plane) } {
+            Some(&pointer) => pointer,
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    /// Hardware frames context of a frame holding hardware surfaces; fails
+    /// on software frames, which carry none.
+    pub(crate) fn hw_frames_ctx(&self) -> Result<&ff::AVHWFramesContext> {
+        unsafe {
+            let buffer = (*self.0).hw_frames_ctx;
+            if buffer.is_null() {
+                return Err(anyhow!("frame has no hw frames context"));
+            }
+            Ok(&*(*buffer).data.cast::<ff::AVHWFramesContext>())
+        }
     }
 }
 
