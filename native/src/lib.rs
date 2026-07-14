@@ -165,6 +165,17 @@ fn vec_to_c_array(strings: Vec<String>) -> *const *const c_char {
     ptr
 }
 
+// releases an error message
+// must be called exactly once per non-null message
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn uuav_string_free(string: *mut c_char) {
+    if string.is_null() {
+        return;
+    }
+
+    drop(unsafe { CString::from_raw(string) });
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn uuav_abi_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), '\0').as_ptr().cast()
