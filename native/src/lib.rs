@@ -17,38 +17,48 @@
     clippy::future_not_send,
     clippy::enum_glob_use
 )]
+// FFI-heavy crate: raw-pointer borrows, numeric casts between C and media
+// timestamp domains, and crate-private modules are pervasive by nature
+// (doc_markdown: insists on backticks around the word "FFmpeg" in prose)
+#![allow(
+    clippy::borrow_as_ptr,
+    clippy::redundant_pub_crate,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_ptr_alignment,
+    clippy::missing_safety_doc,
+    clippy::doc_markdown
+)]
 // TODO solve later
 #![allow(clippy::significant_drop_tightening)]
-// TODO remove once the scaffold stubs are implemented
-#![allow(clippy::todo)]
 
+mod audio_decoder;
+mod ffutil;
 mod hw_device;
 mod player;
+mod video_decoder;
+mod video_output;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context as _, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
-use crossbeam_channel::{Receiver, Sender, bounded};
 use dashmap::DashMap;
 use hw_device::HwDevice;
-use lazy_static::lazy_static;
 use player::UUAVPlayer;
 use std::{
     ffi::{CStr, CString},
     os::raw::{c_char, c_void},
-    ptr::{self, null},
+    ptr,
     sync::{Arc, atomic::AtomicU64},
 };
 
-lazy_static! {
-    static ref INIT_STATE: ArcSwapOption<Runtime> = ArcSwapOption::empty();
-    static ref NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
-    //static ref DATA_CHANNELS: DashMap<u64, (Sender<Vec<f32>>, Receiver<Vec<f32>>)> = DashMap::new(); // TODO remove
-}
+static INIT_STATE: ArcSwapOption<Runtime> = ArcSwapOption::const_empty();
+static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
 struct Runtime {
     device: HwDevice,
     error_callback: ErrorCallback,
-    audio_options: ArcSwap<AudioOptions>,
+    audio_options: Arc<ArcSwap<AudioOptions>>,
     registry: DashMap<PlayerId, UUAVPlayer>,
 }
 
@@ -60,14 +70,14 @@ pub type PlayerId = u64;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub enum UUAVState {
-    UUAV_CLOSED,
-    UUAV_OPENING,
-    UUAV_READY,
-    UUAV_PLAYING,
-    UUAV_PAUSED,
-    UUAV_ENDED,
-    UUAV_ERROR,
-    UUAV_UNKNOWN,
+    UUAV_CLOSED = 0,
+    UUAV_OPENING = 1,
+    UUAV_READY = 2,
+    UUAV_PLAYING = 3,
+    UUAV_PAUSED = 4,
+    UUAV_ENDED = 5,
+    UUAV_ERROR = 6,
+    UUAV_UNKNOWN = 7,
 }
 
 #[repr(C)]
@@ -86,7 +96,7 @@ pub struct AudioOptions {
 }
 
 #[repr(C)]
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct VideoSize {
     pub width: u32,
     pub height: u32,
@@ -107,7 +117,7 @@ pub struct ConsumeFrameResult {
 }
 
 impl NewPlayerResult {
-    fn ok(player_id: PlayerId) -> Self {
+    const fn ok(player_id: PlayerId) -> Self {
         Self {
             player_id,
             error_message: ptr::null(),
@@ -128,7 +138,7 @@ pub struct ResultFFI {
 }
 
 impl ResultFFI {
-    fn ok() -> Self {
+    const fn ok() -> Self {
         Self {
             error_message: ptr::null(),
         }
@@ -154,19 +164,30 @@ fn string_to_c_bytes(s: &str) -> *const c_char {
     CString::new(s).unwrap_or_default().into_raw()
 }
 
-fn vec_to_c_array(strings: Vec<String>) -> *const *const c_char {
-    let cstrings: Vec<*const c_char> = strings.into_iter().map(|s| string_to_c_bytes(&s)).collect();
+const ERR_NO_RUNTIME: &str = "Runtime is not found";
+const ERR_NO_PLAYER: &str = "player with specific id not found";
 
-    let boxed_slice = cstrings.into_boxed_slice();
+impl Runtime {
+    /// Shared-access guard over a registered player; the player stays
+    /// solely owned by the registry, so the guard cannot outlive it.
+    fn player_by_id(
+        &self,
+        player_id: PlayerId,
+    ) -> anyhow::Result<dashmap::mapref::one::Ref<'_, PlayerId, UUAVPlayer>> {
+        self.registry.get(&player_id).context(ERR_NO_PLAYER)
+    }
 
-    let ptr = boxed_slice.as_ptr();
-    std::mem::forget(boxed_slice);
-
-    ptr
+    /// Exclusive-access counterpart of [`Self::player_by_id`].
+    fn player_by_id_mut(
+        &self,
+        player_id: PlayerId,
+    ) -> anyhow::Result<dashmap::mapref::one::RefMut<'_, PlayerId, UUAVPlayer>> {
+        self.registry.get_mut(&player_id).context(ERR_NO_PLAYER)
+    }
 }
 
-// releases an error message
-// must be called exactly once per non-null message
+/// releases an error message
+/// must be called exactly once per non-null message
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uuav_string_free(string: *mut c_char) {
     if string.is_null() {
@@ -177,7 +198,7 @@ pub unsafe extern "C" fn uuav_string_free(string: *mut c_char) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn uuav_abi_version() -> *const c_char {
+pub const extern "C" fn uuav_abi_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), '\0').as_ptr().cast()
 }
 
@@ -191,11 +212,8 @@ pub extern "C" fn uuav_init(
         return ResultFFI::error("Already initialized");
     }
 
-    let error_callback = match error_callback {
-        Some(e) => e,
-        None => {
-            return ResultFFI::error("Error callback is null");
-        }
+    let Some(error_callback) = error_callback else {
+        return ResultFFI::error("Error callback is null");
     };
 
     if hw_device.is_null() {
@@ -205,7 +223,7 @@ pub extern "C" fn uuav_init(
     let new_runtime = Runtime {
         device: HwDevice::from_raw(hw_device),
         error_callback,
-        audio_options: ArcSwap::new(Arc::new(audio_options)),
+        audio_options: Arc::new(ArcSwap::new(Arc::new(audio_options))),
         registry: DashMap::new(),
     };
 
@@ -250,10 +268,10 @@ pub extern "C" fn uuav_status() -> Status {
 pub extern "C" fn uuav_player_new() -> NewPlayerResult {
     let state = INIT_STATE.load();
     let Some(s) = state.as_ref() else {
-        return NewPlayerResult::error("Runtime is not found");
+        return NewPlayerResult::error(ERR_NO_RUNTIME);
     };
 
-    let player = UUAVPlayer::new(s.device);
+    let player = UUAVPlayer::new(s.device, Arc::clone(&s.audio_options), s.error_callback);
     let next_id = NEXT_STREAM_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     s.registry.insert(next_id, player);
 
@@ -274,32 +292,24 @@ pub extern "C" fn uuav_player_free(player_id: PlayerId) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn uuav_player_play(player_id: PlayerId) -> ResultFFI {
+    uuav_player_play_internal(player_id).into()
+}
+
+fn uuav_player_play_internal(player_id: PlayerId) -> anyhow::Result<()> {
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
-        return ResultFFI::error("Runtime is not found");
-    };
-
-    let player = state.registry.get(&player_id);
-    let Some(player) = player else {
-        return ResultFFI::error("player with specific id not found");
-    };
-
-    player.play().into()
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    runtime.player_by_id(player_id)?.play()
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn uuav_player_pause(player_id: PlayerId) -> ResultFFI {
+    uuav_player_pause_internal(player_id).into()
+}
+
+fn uuav_player_pause_internal(player_id: PlayerId) -> anyhow::Result<()> {
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
-        return ResultFFI::error("Runtime is not found");
-    };
-
-    let player = state.registry.get(&player_id);
-    let Some(player) = player else {
-        return ResultFFI::error("player with specific id not found");
-    };
-
-    player.pause().into()
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    runtime.player_by_id(player_id)?.pause()
 }
 
 // async! returns immediately
@@ -308,53 +318,45 @@ pub unsafe extern "C" fn uuav_player_open_media_async(
     player_id: PlayerId,
     url: *const c_char,
 ) -> ResultFFI {
+    unsafe { uuav_player_open_media_async_internal(player_id, url) }.into()
+}
+
+unsafe fn uuav_player_open_media_async_internal(
+    player_id: PlayerId,
+    url: *const c_char,
+) -> anyhow::Result<()> {
+    ensure!(!url.is_null(), "url is null");
+    let url = unsafe { CStr::from_ptr(url) }
+        .to_str()
+        .context("url is not valid UTF-8")?
+        .to_owned();
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
-        return ResultFFI::error("Runtime is not found");
-    };
-
-    if url.is_null() {
-        return ResultFFI::error("url is null");
-    }
-
-    let url = match unsafe { CStr::from_ptr(url) }.to_str() {
-        Ok(s) => s.to_owned(),
-        Err(_) => return ResultFFI::error("url is not valid UTF-8"),
-    };
-
-    let Some(mut player) = state.registry.get_mut(&player_id) else {
-        return ResultFFI::error("player with specific id not found");
-    };
-
-    player.open_media_intent(url).into()
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    runtime.player_by_id_mut(player_id)?.open_media_intent(url)
 }
 
 // back to CLOSED, player reusable
 #[unsafe(no_mangle)]
 pub extern "C" fn uuav_player_close_media(player_id: PlayerId) -> ResultFFI {
+    uuav_player_close_media_internal(player_id).into()
+}
+
+fn uuav_player_close_media_internal(player_id: PlayerId) -> anyhow::Result<()> {
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
-        return ResultFFI::error("Runtime is not found");
-    };
-
-    let Some(mut player) = state.registry.get_mut(&player_id) else {
-        return ResultFFI::error("player with specific id not found");
-    };
-
-    player.close_media().into()
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    runtime.player_by_id_mut(player_id)?.close_media()
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn uuav_player_state(player_id: PlayerId) -> UUAVState {
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
+    let Some(runtime) = state.as_ref() else {
         return UUAVState::UUAV_UNKNOWN;
     };
 
-    match state.registry.get(&player_id) {
-        Some(player) => player.state(),
-        None => UUAVState::UUAV_UNKNOWN,
-    }
+    runtime
+        .player_by_id(player_id)
+        .map_or(UUAVState::UUAV_UNKNOWN, |player| player.state())
 }
 
 // valid from READY; may be unavailable for realtime streams
@@ -363,29 +365,22 @@ pub unsafe extern "C" fn uuav_player_duration(
     player_id: PlayerId,
     out_duration: *mut f64,
 ) -> ResultFFI {
-    if out_duration.is_null() {
-        return ResultFFI::error("out_duration is null");
-    }
+    unsafe { uuav_player_duration_internal(player_id, out_duration) }.into()
+}
 
+unsafe fn uuav_player_duration_internal(
+    player_id: PlayerId,
+    out_duration: *mut f64,
+) -> anyhow::Result<()> {
+    ensure!(!out_duration.is_null(), "out pointer is null");
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
-        return ResultFFI::error("Runtime is not found");
-    };
-
-    let Some(player) = state.registry.get(&player_id) else {
-        return ResultFFI::error("player with specific id not found");
-    };
-
-    match player.duration() {
-        Ok(Some(duration)) => {
-            unsafe {
-                *out_duration = duration;
-            }
-            ResultFFI::ok()
-        }
-        Ok(None) => ResultFFI::error("duration is not available"),
-        Err(e) => ResultFFI::error(e.to_string().as_str()),
-    }
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    let duration = runtime
+        .player_by_id(player_id)?
+        .duration()
+        .context("duration is not available")?;
+    unsafe { out_duration.write(duration) };
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
@@ -393,29 +388,22 @@ pub unsafe extern "C" fn uuav_player_current_time(
     player_id: PlayerId,
     out_time: *mut f64,
 ) -> ResultFFI {
-    if out_time.is_null() {
-        return ResultFFI::error("out_time is null");
-    }
+    unsafe { uuav_player_current_time_internal(player_id, out_time) }.into()
+}
 
+unsafe fn uuav_player_current_time_internal(
+    player_id: PlayerId,
+    out_time: *mut f64,
+) -> anyhow::Result<()> {
+    ensure!(!out_time.is_null(), "out pointer is null");
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
-        return ResultFFI::error("Runtime is not found");
-    };
-
-    let Some(player) = state.registry.get(&player_id) else {
-        return ResultFFI::error("player with specific id not found");
-    };
-
-    match player.current_time() {
-        Ok(Some(time)) => {
-            unsafe {
-                *out_time = time;
-            }
-            ResultFFI::ok()
-        }
-        Ok(None) => ResultFFI::error("current time is not available"),
-        Err(e) => ResultFFI::error(e.to_string().as_str()),
-    }
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    let time = runtime
+        .player_by_id(player_id)?
+        .current_time()
+        .context("current time is not available")?;
+    unsafe { out_time.write(time) };
+    Ok(())
 }
 
 // the player slaves its playback to the externally provided master clock
@@ -424,16 +412,18 @@ pub extern "C" fn uuav_player_assign_master_clock(
     player_id: PlayerId,
     current_time: f64,
 ) -> ResultFFI {
+    uuav_player_assign_master_clock_internal(player_id, current_time).into()
+}
+
+fn uuav_player_assign_master_clock_internal(
+    player_id: PlayerId,
+    current_time: f64,
+) -> anyhow::Result<()> {
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
-        return ResultFFI::error("Runtime is not found");
-    };
-
-    let Some(player) = state.registry.get(&player_id) else {
-        return ResultFFI::error("player with specific id not found");
-    };
-
-    player.assign_master_clock(current_time).into()
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    runtime
+        .player_by_id(player_id)?
+        .assign_master_clock(current_time)
 }
 
 // valid from READY
@@ -442,29 +432,22 @@ pub unsafe extern "C" fn uuav_player_get_video_size(
     player_id: PlayerId,
     out_size: *mut VideoSize,
 ) -> ResultFFI {
-    if out_size.is_null() {
-        return ResultFFI::error("out_size is null");
-    }
+    unsafe { uuav_player_get_video_size_internal(player_id, out_size) }.into()
+}
 
+unsafe fn uuav_player_get_video_size_internal(
+    player_id: PlayerId,
+    out_size: *mut VideoSize,
+) -> anyhow::Result<()> {
+    ensure!(!out_size.is_null(), "out pointer is null");
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
-        return ResultFFI::error("Runtime is not found");
-    };
-
-    let Some(_player) = state.registry.get(&player_id) else {
-        return ResultFFI::error("player with specific id not found");
-    };
-
-    match UUAVPlayer::video_size() {
-        Ok(Some(size)) => {
-            unsafe {
-                *out_size = size;
-            }
-            ResultFFI::ok()
-        }
-        Ok(None) => ResultFFI::error("video size is not available yet"),
-        Err(e) => ResultFFI::error(e.to_string().as_str()),
-    }
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    let size = runtime
+        .player_by_id(player_id)?
+        .video_size()
+        .context("video size is not available yet")?;
+    unsafe { out_size.write(size) };
+    Ok(())
 }
 
 // ---- transport (commands: set flags, decoder thread obeys) ----------
@@ -472,16 +455,13 @@ pub unsafe extern "C" fn uuav_player_get_video_size(
 // async; coalesces repeated calls
 #[unsafe(no_mangle)]
 pub extern "C" fn uuav_player_seek_async(player_id: PlayerId, time: f64) -> ResultFFI {
+    uuav_player_seek_async_internal(player_id, time).into()
+}
+
+fn uuav_player_seek_async_internal(player_id: PlayerId, time: f64) -> anyhow::Result<()> {
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
-        return ResultFFI::error("Runtime is not found");
-    };
-
-    let Some(player) = state.registry.get(&player_id) else {
-        return ResultFFI::error("player with specific id not found");
-    };
-
-    player.seek_intent(time).into()
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    runtime.player_by_id(player_id)?.seek_intent(time)
 }
 
 // ---- video -----------------------------------------------------------
@@ -492,8 +472,18 @@ pub type UUAVRenderEvent = extern "C" fn(event_id: i32);
 // [render] entry point issued via GL.IssuePluginEvent;
 // `event_id` routes to the player with the matching id
 extern "C" fn uuav_render_event(event_id: i32) {
-    let _ = event_id;
-    todo!()
+    let Ok(player_id) = PlayerId::try_from(event_id) else {
+        return;
+    };
+
+    let state = INIT_STATE.load();
+    let Some(runtime) = state.as_ref() else {
+        return;
+    };
+
+    if let Ok(player) = runtime.player_by_id(player_id) {
+        player.on_render_event();
+    }
 }
 
 // pass to GL.IssuePluginEvent
@@ -502,35 +492,32 @@ pub extern "C" fn uuav_get_render_callback() -> UUAVRenderEvent {
     uuav_render_event
 }
 
-// SRV: plane 0 = Y, 1 = UV; valid from READY; recreated on resolution change
+// NV12 ID3D11Texture2D; the engine creates its own plane views over it
+// (`plane` is accepted for ABI compatibility and ignored). Valid from the
+// first presented frame; recreated on resolution change — re-query then.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uuav_player_get_video_texture(
     player_id: PlayerId,
     plane: i32,
     out_texture: *mut *const c_void,
 ) -> ResultFFI {
-    if out_texture.is_null() {
-        return ResultFFI::error("out_texture is null");
-    }
+    let _ = plane;
+    unsafe { uuav_player_get_video_texture_internal(player_id, out_texture) }.into()
+}
 
+unsafe fn uuav_player_get_video_texture_internal(
+    player_id: PlayerId,
+    out_texture: *mut *const c_void,
+) -> anyhow::Result<()> {
+    ensure!(!out_texture.is_null(), "out pointer is null");
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
-        return ResultFFI::error("Runtime is not found");
-    };
-
-    let Some(player) = state.registry.get(&player_id) else {
-        return ResultFFI::error("player with specific id not found");
-    };
-
-    match player.video_texture(plane) {
-        Ok(texture) => {
-            unsafe {
-                *out_texture = texture;
-            }
-            ResultFFI::ok()
-        }
-        Err(e) => ResultFFI::error(e.to_string().as_str()),
-    }
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    let texture = runtime
+        .player_by_id(player_id)?
+        .video_texture()
+        .context("video texture is not available yet")?;
+    unsafe { out_texture.write(texture) };
+    Ok(())
 }
 
 // ---- audio -----------------------------------------------------------
@@ -548,13 +535,11 @@ pub unsafe extern "C" fn uuav_player_read_audio(
     }
 
     let state = INIT_STATE.load();
-    let Some(state) = state.as_ref() else {
+    let Some(runtime) = state.as_ref() else {
         return 0;
     };
 
-    let Some(player) = state.registry.get(&player_id) else {
-        return 0;
-    };
-
-    player.read_audio(dst, nb_frames)
+    runtime
+        .player_by_id(player_id)
+        .map_or(0, |player| player.read_audio(dst, nb_frames))
 }
