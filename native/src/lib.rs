@@ -202,8 +202,10 @@ pub const extern "C" fn uuav_abi_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), '\0').as_ptr().cast()
 }
 
+/// # Safety
+/// `hw_device` must be null (rejected) or a live `ID3D11Device*`.
 #[unsafe(no_mangle)]
-pub extern "C" fn uuav_init(
+pub unsafe extern "C" fn uuav_init(
     hw_device: *const c_void,
     audio_options: AudioOptions,
     error_callback: Option<ErrorCallback>,
@@ -220,8 +222,13 @@ pub extern "C" fn uuav_init(
         return ResultFFI::error("HwDevice is null");
     }
 
+    let device = match unsafe { HwDevice::from_raw(hw_device) } {
+        Ok(device) => device,
+        Err(e) => return ResultFFI::error(&e.to_string()),
+    };
+
     let new_runtime = Runtime {
-        device: HwDevice::from_raw(hw_device),
+        device,
         error_callback,
         audio_options: Arc::new(ArcSwap::new(Arc::new(audio_options))),
         registry: DashMap::new(),
@@ -271,7 +278,7 @@ pub extern "C" fn uuav_player_new() -> NewPlayerResult {
         return NewPlayerResult::error(ERR_NO_RUNTIME);
     };
 
-    let player = UUAVPlayer::new(s.device, Arc::clone(&s.audio_options), s.error_callback);
+    let player = UUAVPlayer::new(s.device.clone(), Arc::clone(&s.audio_options), s.error_callback);
     let next_id = NEXT_STREAM_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     s.registry.insert(next_id, player);
 
