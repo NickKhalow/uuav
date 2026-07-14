@@ -1,7 +1,4 @@
 //! Thin RAII wrappers and error helpers over `ffmpeg-sys-next`.
-//!
-//! `ffmpeg-next` 8.1 does not compile against the bundled FFmpeg 8.1 headers,
-//! so the pipeline talks to the sys bindings directly through these helpers.
 
 use anyhow::{Result, anyhow};
 use ffmpeg_sys_next as ff;
