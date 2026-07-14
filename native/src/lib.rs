@@ -31,7 +31,9 @@ impl Drop for UUAVPlayer {
 }
 
 #[allow(non_camel_case_types)]
-enum UUAVState {
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub enum UUAVState {
     UUAV_CLOSED,
     UUAV_OPENING,
     UUAV_READY,
@@ -39,6 +41,7 @@ enum UUAVState {
     UUAV_PAUSED,
     UUAV_ENDED,
     UUAV_ERROR,
+    UUAV_UNKNOWN,
 }
 
 impl UUAVPlayer {
@@ -88,13 +91,17 @@ impl UUAVPlayer {
         todo!()
     }
 
-    /*
+    // TODO> Who notifies the consumer about recreation? What is the lifetime of the previous texture?
+    // SRV: plane 0 = Y, 1 = UV; valid from READY; recreated on resolution change
+    fn video_texture(&self, plane: i32) -> anyhow::Result<*const c_void> {
+        todo!()
+    }
 
-    // ---- transport (commands: set flags, decoder thread obeys) ----------
-    int         uuav_player_play(UUAVPlayer* p);            // [main]
-    int         uuav_player_pause(UUAVPlayer* p);           // [main]
-    int         uuav_player_seek_async(UUAVPlayer* p, double time);  // [main] async; coalesces repeated calls
-        */
+    // fills interleaved FLT; pads silence on underrun,
+    // never blocks; returns frames actually copied
+    fn read_audio(&self, dst: *mut f32, nb_frames: i32) -> i32 {
+        todo!()
+    }
 }
 
 // Is guaranteed to live the whole lifecycle of the app, static lifetime
@@ -315,6 +322,8 @@ pub extern "C" fn uuav_player_free(player_id: PlayerId) {
     s.registry.remove(&player_id);
 }
 
+// ---- lifecycle -------------------------------------------------------
+
 #[unsafe(no_mangle)]
 pub extern "C" fn uuav_player_play(player_id: PlayerId) -> ResultFFI {
     let state = INIT_STATE.load();
@@ -324,49 +333,255 @@ pub extern "C" fn uuav_player_play(player_id: PlayerId) -> ResultFFI {
 
     let player = state.registry.get(&player_id);
     let Some(player) = player else {
-        return ResultFFI::error("stream with specified id not found");
+        return ResultFFI::error("player with specific id not found");
     };
 
     player.play().into()
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn uuav_player_pause(player_id: PlayerId) -> ResultFFI {
+pub extern "C" fn uuav_player_pause(player_id: PlayerId) -> ResultFFI {
+    let state = INIT_STATE.load();
+    let Some(state) = state.as_ref() else {
+        return ResultFFI::error("Runtime is not found");
+    };
+
+    let player = state.registry.get(&player_id);
+    let Some(player) = player else {
+        return ResultFFI::error("player with specific id not found");
+    };
+
+    player.pause().into()
+}
+
+// async! returns immediately
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn uuav_player_open_media_async(
+    player_id: PlayerId,
+    url: *const c_char,
+) -> ResultFFI {
+    let state = INIT_STATE.load();
+    let Some(state) = state.as_ref() else {
+        return ResultFFI::error("Runtime is not found");
+    };
+
+    if url.is_null() {
+        return ResultFFI::error("url is null");
+    }
+
+    let url = match unsafe { CStr::from_ptr(url) }.to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => return ResultFFI::error("url is not valid UTF-8"),
+    };
+
+    let Some(mut player) = state.registry.get_mut(&player_id) else {
+        return ResultFFI::error("player with specific id not found");
+    };
+
+    player.open_media_intent(url).into()
+}
+
+// back to CLOSED, player reusable
+#[unsafe(no_mangle)]
+pub extern "C" fn uuav_player_close_media(player_id: PlayerId) -> ResultFFI {
+    let state = INIT_STATE.load();
+    let Some(state) = state.as_ref() else {
+        return ResultFFI::error("Runtime is not found");
+    };
+
+    let Some(mut player) = state.registry.get_mut(&player_id) else {
+        return ResultFFI::error("player with specific id not found");
+    };
+
+    player.close_media().into()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn uuav_player_state(player_id: PlayerId) -> UUAVState {
+    let state = INIT_STATE.load();
+    let Some(state) = state.as_ref() else {
+        return UUAVState::UUAV_UNKNOWN;
+    };
+
+    match state.registry.get(&player_id) {
+        Some(player) => player.state(),
+        None => UUAVState::UUAV_UNKNOWN,
+    }
+}
+
+// valid from READY; may be unavailable for realtime streams
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn uuav_player_duration(
+    player_id: PlayerId,
+    out_duration: *mut f64,
+) -> ResultFFI {
+    if out_duration.is_null() {
+        return ResultFFI::error("out_duration is null");
+    }
+
+    let state = INIT_STATE.load();
+    let Some(state) = state.as_ref() else {
+        return ResultFFI::error("Runtime is not found");
+    };
+
+    let Some(player) = state.registry.get(&player_id) else {
+        return ResultFFI::error("player with specific id not found");
+    };
+
+    match player.duration() {
+        Ok(Some(duration)) => {
+            unsafe {
+                *out_duration = duration;
+            }
+            ResultFFI::ok()
+        }
+        Ok(None) => ResultFFI::error("duration is not available"),
+        Err(e) => ResultFFI::error(e.to_string().as_str()),
+    }
+}
+
+// current master-clock position
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn uuav_player_current_time(
+    player_id: PlayerId,
+    out_time: *mut f64,
+) -> ResultFFI {
+    if out_time.is_null() {
+        return ResultFFI::error("out_time is null");
+    }
+
+    let state = INIT_STATE.load();
+    let Some(state) = state.as_ref() else {
+        return ResultFFI::error("Runtime is not found");
+    };
+
+    let Some(player) = state.registry.get(&player_id) else {
+        return ResultFFI::error("player with specific id not found");
+    };
+
+    match player.current_time() {
+        Ok(Some(time)) => {
+            unsafe {
+                *out_time = time;
+            }
+            ResultFFI::ok()
+        }
+        Ok(None) => ResultFFI::error("current time is not available"),
+        Err(e) => ResultFFI::error(e.to_string().as_str()),
+    }
+}
+
+// valid from READY
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn uuav_player_get_video_size(
+    player_id: PlayerId,
+    out_size: *mut VideoSize,
+) -> ResultFFI {
+    if out_size.is_null() {
+        return ResultFFI::error("out_size is null");
+    }
+
+    let state = INIT_STATE.load();
+    let Some(state) = state.as_ref() else {
+        return ResultFFI::error("Runtime is not found");
+    };
+
+    let Some(_player) = state.registry.get(&player_id) else {
+        return ResultFFI::error("player with specific id not found");
+    };
+
+    match UUAVPlayer::video_size() {
+        Ok(Some(size)) => {
+            unsafe {
+                *out_size = size;
+            }
+            ResultFFI::ok()
+        }
+        Ok(None) => ResultFFI::error("video size is not available yet"),
+        Err(e) => ResultFFI::error(e.to_string().as_str()),
+    }
+}
+
+// ---- transport (commands: set flags, decoder thread obeys) ----------
+
+// async; coalesces repeated calls
+#[unsafe(no_mangle)]
+pub extern "C" fn uuav_player_seek_async(player_id: PlayerId, time: f64) -> ResultFFI {
+    let state = INIT_STATE.load();
+    let Some(state) = state.as_ref() else {
+        return ResultFFI::error("Runtime is not found");
+    };
+
+    let Some(player) = state.registry.get(&player_id) else {
+        return ResultFFI::error("player with specific id not found");
+    };
+
+    player.seek_intent(time).into()
+}
+
+// ---- video -----------------------------------------------------------
+
+// Unity's UnityRenderingEvent signature
+pub type UUAVRenderEvent = extern "C" fn(event_id: i32);
+
+// [render] entry point issued via GL.IssuePluginEvent;
+// `event_id` routes to the player with the matching id
+extern "C" fn uuav_render_event(event_id: i32) {
+    let _ = event_id;
     todo!()
 }
 
-/*
-// ---- lifecycle -------------------------------------------------------
-int         uuav_player_open_media_async(UUAVPlayer* p, const char* url);  // [main] async! returns immediately
-void        uuav_player_close_media(UUAVPlayer* p);     // [main] back to CLOSED, player reusable
+// pass to GL.IssuePluginEvent
+#[unsafe(no_mangle)]
+pub extern "C" fn uuav_get_render_callback() -> UUAVRenderEvent {
+    uuav_render_event
+}
 
-// STATE - caller MUST provide a valid pointer to a player instance
+// TODO - migrate to ResultFFI 
+// SRV: plane 0 = Y, 1 = UV; valid from READY; recreated on resolution change
+#[unsafe(no_mangle)]
+pub extern "C" fn uuav_player_get_video_texture(player_id: PlayerId, plane: i32) -> *const c_void {
+    let state = INIT_STATE.load();
+    let Some(state) = state.as_ref() else {
+        return ptr::null();
+    };
 
-typedef enum { UUAV_CLOSED, UUAV_OPENING, UUAV_READY, UUAV_PLAYING,
-             UUAV_PAUSED, UUAV_ENDED, UUAV_ERROR } UUAVState;
+    let Some(player) = state.registry.get(&player_id) else {
+        return ptr::null();
+    };
 
-UUAVState   uuav_player_state(UUAVPlayer* p);       // [any]
-int         uuav_player_last_error(UUAVPlayer* p, char* buf, int buf_size); // [main]
-double      uuav_player_duration(UUAVPlayer* p);    // [any] NaN until READY (what about realtime streams?)
-double      uuav_player_current_time(UUAVPlayer* p);        // [any] current master-clock position
-int         uuav_player_get_video_size(UUAVPlayer* p, int* w, int* h); // [main] valid from READY
-
-// ---- transport (commands: set flags, decoder thread obeys) ----------
-int         uuav_player_play(UUAVPlayer* p);            // [main]
-int         uuav_player_pause(UUAVPlayer* p);           // [main]
-int         uuav_player_seek_async(UUAVPlayer* p, double time);  // [main] async; coalesces repeated calls
-
-// ---- video -----------------------------------------------------------
-typedef void (*UUAVRenderEvent)(int event_id);          // Unity's UnityRenderingEvent signature
-UUAVRenderEvent uuav_get_render_callback(void);         // [any]  pass to GL.IssuePluginEvent
-int         uuav_player_get_id(UUAVPlayer* p);          // [any]  the event_id routing the callback to this player
-
-void*       uuav_player_get_video_texture(UUAVPlayer* p, int plane); // [main] SRV: plane 0 = Y, 1 = UV
-                                                      // valid from READY; recreated on resolution change
+    match player.video_texture(plane) {
+        Ok(texture) => texture,
+        Err(e) => {
+            let message = CString::new(e.to_string()).unwrap_or_default();
+            (state.error_callback)(message.as_ptr());
+            ptr::null()
+        }
+    }
+}
 
 // ---- audio -----------------------------------------------------------
-int         uuav_player_read_audio(UUAVPlayer* p, float* dst, int nb_frames);
-                                                      // [audio] fills interleaved FLT; pads silence on underrun,
-                                                      //         never blocks; returns frames actually copied
 
-*/
+// [audio] fills interleaved FLT; pads silence on underrun,
+// never blocks; returns frames actually copied
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn uuav_player_read_audio(
+    player_id: PlayerId,
+    dst: *mut f32,
+    nb_frames: i32,
+) -> i32 {
+    if dst.is_null() || nb_frames <= 0 {
+        return 0;
+    }
+
+    let state = INIT_STATE.load();
+    let Some(state) = state.as_ref() else {
+        return 0;
+    };
+
+    let Some(player) = state.registry.get(&player_id) else {
+        return 0;
+    };
+
+    player.read_audio(dst, nb_frames)
+}
