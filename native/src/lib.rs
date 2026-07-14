@@ -85,14 +85,54 @@ pub enum UUAVState {
 pub struct Status {
     pub players_count: u64,
     pub initialized: bool,
-    pub audio_options: AudioOptions,
+    pub audio_options: AudioOptionsRaw,
 }
 
+/// Untrusted external input, must never be used for internals.
+/// Always convert to AudioOptions to sanitize.
 #[repr(C)]
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub struct AudioOptionsRaw {
+    pub sample_rate: i32,
+    pub channels: i32,
+}
+
+/// Sanitized input, guarantees to have values greater than zero
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct AudioOptions {
     pub sample_rate: i32,
     pub channels: i32,
+}
+
+impl TryFrom<AudioOptionsRaw> for AudioOptions {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: AudioOptionsRaw) -> Result<Self, Self::Error> {
+        ensure!(
+            raw.sample_rate > 0,
+            "sample_rate must be positive, got {}",
+            raw.sample_rate
+        );
+        ensure!(
+            raw.channels > 0,
+            "channels must be positive, got {}",
+            raw.channels
+        );
+        Ok(Self {
+            sample_rate: raw.sample_rate,
+            channels: raw.channels,
+        })
+    }
+}
+
+impl From<AudioOptions> for AudioOptionsRaw {
+    fn from(options: AudioOptions) -> Self {
+        Self {
+            sample_rate: options.sample_rate,
+            channels: options.channels,
+        }
+    }
 }
 
 #[repr(C)]
@@ -207,7 +247,7 @@ pub const extern "C" fn uuav_abi_version() -> *const c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uuav_init(
     hw_device: *const c_void,
-    audio_options: AudioOptions,
+    audio_options: AudioOptionsRaw,
     error_callback: Option<ErrorCallback>,
 ) -> ResultFFI {
     if INIT_STATE.load().is_some() {
@@ -221,6 +261,11 @@ pub unsafe extern "C" fn uuav_init(
     if hw_device.is_null() {
         return ResultFFI::error("HwDevice is null");
     }
+
+    let audio_options = match AudioOptions::try_from(audio_options) {
+        Ok(options) => options,
+        Err(e) => return ResultFFI::error(&e.to_string()),
+    };
 
     let device = match unsafe { HwDevice::from_raw(hw_device) } {
         Ok(device) => device,
@@ -244,21 +289,26 @@ pub extern "C" fn uuav_deinit() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn uuav_update_audio_out(options: AudioOptions) -> ResultFFI {
+pub extern "C" fn uuav_update_audio_out(options: AudioOptionsRaw) -> ResultFFI {
     let state = INIT_STATE.load();
 
-    if let Some(s) = state.as_ref() {
-        s.audio_options.store(options.into());
-        ResultFFI::ok()
-    } else {
-        ResultFFI::error("Not initialized")
+    let Some(s) = state.as_ref() else {
+        return ResultFFI::error("Not initialized");
+    };
+
+    match AudioOptions::try_from(options) {
+        Ok(options) => {
+            s.audio_options.store(Arc::new(options));
+            ResultFFI::ok()
+        }
+        Err(e) => ResultFFI::error(&e.to_string()),
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn uuav_status() -> Status {
     if let Some(s) = INIT_STATE.load().as_ref() {
-        let audio_options = (**s.audio_options.load()).clone();
+        let audio_options = (**s.audio_options.load()).into();
         let players_count = s.registry.len() as u64;
 
         Status {
@@ -278,7 +328,11 @@ pub extern "C" fn uuav_player_new() -> NewPlayerResult {
         return NewPlayerResult::error(ERR_NO_RUNTIME);
     };
 
-    let player = UUAVPlayer::new(s.device.clone(), Arc::clone(&s.audio_options), s.error_callback);
+    let player = UUAVPlayer::new(
+        s.device.clone(),
+        Arc::clone(&s.audio_options),
+        s.error_callback,
+    );
     let next_id = NEXT_STREAM_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     s.registry.insert(next_id, player);
 
