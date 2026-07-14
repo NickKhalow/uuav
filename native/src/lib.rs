@@ -537,26 +537,34 @@ pub extern "C" fn uuav_get_render_callback() -> UUAVRenderEvent {
     uuav_render_event
 }
 
-// TODO - migrate to ResultFFI 
 // SRV: plane 0 = Y, 1 = UV; valid from READY; recreated on resolution change
 #[unsafe(no_mangle)]
-pub extern "C" fn uuav_player_get_video_texture(player_id: PlayerId, plane: i32) -> *const c_void {
+pub unsafe extern "C" fn uuav_player_get_video_texture(
+    player_id: PlayerId,
+    plane: i32,
+    out_texture: *mut *const c_void,
+) -> ResultFFI {
+    if out_texture.is_null() {
+        return ResultFFI::error("out_texture is null");
+    }
+
     let state = INIT_STATE.load();
     let Some(state) = state.as_ref() else {
-        return ptr::null();
+        return ResultFFI::error("Runtime is not found");
     };
 
     let Some(player) = state.registry.get(&player_id) else {
-        return ptr::null();
+        return ResultFFI::error("player with specific id not found");
     };
 
     match player.video_texture(plane) {
-        Ok(texture) => texture,
-        Err(e) => {
-            let message = CString::new(e.to_string()).unwrap_or_default();
-            (state.error_callback)(message.as_ptr());
-            ptr::null()
+        Ok(texture) => {
+            unsafe {
+                *out_texture = texture;
+            }
+            ResultFFI::ok()
         }
+        Err(e) => ResultFFI::error(e.to_string().as_str()),
     }
 }
 
