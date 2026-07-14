@@ -87,6 +87,11 @@ impl UUAVPlayer {
         todo!()
     }
 
+    // the player slaves its playback to the externally provided master clock
+    fn assign_current_master_clock(&self, time: f64) -> anyhow::Result<()> {
+        todo!()
+    }
+
     fn video_size() -> anyhow::Result<Option<VideoSize>> {
         todo!()
     }
@@ -440,7 +445,6 @@ pub unsafe extern "C" fn uuav_player_duration(
     }
 }
 
-// current master-clock position
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uuav_player_current_time(
     player_id: PlayerId,
@@ -469,6 +473,24 @@ pub unsafe extern "C" fn uuav_player_current_time(
         Ok(None) => ResultFFI::error("current time is not available"),
         Err(e) => ResultFFI::error(e.to_string().as_str()),
     }
+}
+
+// the player slaves its playback to the externally provided master clock
+#[unsafe(no_mangle)]
+pub extern "C" fn uuav_player_assign_current_master_clock(
+    player_id: PlayerId,
+    time: f64,
+) -> ResultFFI {
+    let state = INIT_STATE.load();
+    let Some(state) = state.as_ref() else {
+        return ResultFFI::error("Runtime is not found");
+    };
+
+    let Some(player) = state.registry.get(&player_id) else {
+        return ResultFFI::error("player with specific id not found");
+    };
+
+    player.assign_current_master_clock(time).into()
 }
 
 // valid from READY
