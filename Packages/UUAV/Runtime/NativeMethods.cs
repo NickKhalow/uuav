@@ -22,8 +22,8 @@ namespace UUAV
     [StructLayout(LayoutKind.Sequential)]
     public struct AudioOptions
     {
-        public uint SampleRate;
-        public uint Channels;
+        public int SampleRate;
+        public int Channels;
     }
 
     [StructLayout(LayoutKind.Sequential)]
