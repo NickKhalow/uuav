@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use ffmpeg_sys_next as ff;
 use std::mem;
 use std::os::raw::c_int;
@@ -83,9 +83,11 @@ impl Resampler {
     /// Converts the frame's samples into interleaved `f32` at the output
     /// rate.
     fn convert(&mut self, frame: &OwnedFrame) -> Result<Vec<f32>> {
-        let in_rate = frame.sample_rate().max(1);
+        let in_rate = frame.sample_rate();
+        ensure!(in_rate > 0, "invalid audio frame sample rate: {in_rate}");
         let in_samples = frame.nb_samples();
-        let delay = self.swr.delay(i64::from(in_rate));
+        let delay = self.swr.apply_delay_and_modify(i64::from(in_rate));
+
         // generous headroom over the exact rescale to absorb rounding
         let out_capacity = (((delay as f64 + f64::from(in_samples))
             * f64::from(self.output.sample_rate)
@@ -95,12 +97,9 @@ impl Resampler {
 
         // AudioOptions is sanitized at the FFI boundary: always positive
         let channels = self.output.channels as usize;
-        let mut samples = vec![
-            0.0_f32;
-            usize::try_from(out_capacity)
-                .unwrap_or(0)
-                .saturating_mul(channels)
-        ];
+        let out_capacity_usize =
+            usize::try_from(out_capacity).context("negative resampler output capacity")?;
+        let mut samples = vec![0.0_f32; out_capacity_usize * channels];
 
         let out_planes = [samples.as_mut_ptr().cast::<u8>()];
         // SAFETY: `samples` has room for `out_capacity` interleaved output
@@ -115,9 +114,7 @@ impl Resampler {
         }?;
 
         samples.truncate(
-            usize::try_from(converted)
-                .unwrap_or(0)
-                .saturating_mul(channels),
+            usize::try_from(converted).context("negative converted sample count")? * channels,
         );
         Ok(samples)
     }

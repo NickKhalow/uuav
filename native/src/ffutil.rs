@@ -266,7 +266,7 @@ impl OwnedSwr {
 
     /// Upper bound on the samples buffered inside the resampler, in units
     /// of `1 / base` (pass the input rate to count input samples).
-    pub(crate) fn delay(&self, base: i64) -> i64 {
+    pub(crate) fn apply_delay_and_modify(&self, base: i64) -> i64 {
         unsafe { ff::swr_get_delay(self.0, base) }
     }
 
