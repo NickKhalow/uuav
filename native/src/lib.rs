@@ -147,8 +147,8 @@ impl TryFrom<AudioOptionsRaw> for AudioOptions {
 impl From<AudioOptions> for AudioOptionsRaw {
     fn from(options: AudioOptions) -> Self {
         Self {
-            sample_rate: options.sample_rate,
-            channels: options.channels,
+            sample_rate: options.sample_rate.get(),
+            channels: options.channels.get(),
         }
     }
 }
