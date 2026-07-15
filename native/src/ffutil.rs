@@ -3,8 +3,8 @@
 use anyhow::{Result, anyhow};
 use ffmpeg_sys_next as ff;
 use std::ffi::CStr;
-use std::os::raw::{c_char, c_int};
 use std::num::NonZeroI32;
+use std::os::raw::{c_char, c_int};
 
 /// "Decoder needs more input" return code. FFmpeg has no named define for
 /// it: the C API spells it `AVERROR(EAGAIN)`, with `EAGAIN` coming from the
