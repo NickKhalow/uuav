@@ -193,6 +193,106 @@ impl Drop for OwnedFrame {
     }
 }
 
+/// Owning wrapper around an `AVChannelLayout`.
+pub(crate) struct OwnedChannelLayout(ff::AVChannelLayout);
+
+impl OwnedChannelLayout {
+    /// Native layout for the given channel count.
+    pub(crate) fn default_for(channels: c_int) -> Self {
+        let mut layout: ff::AVChannelLayout = unsafe { std::mem::zeroed() };
+        unsafe { ff::av_channel_layout_default(&mut layout, channels) };
+        Self(layout)
+    }
+
+    /// Deep copy of an existing layout.
+    pub(crate) fn copied_from(layout: &ff::AVChannelLayout) -> Result<Self> {
+        let mut owned = Self(unsafe { std::mem::zeroed() });
+        check("av_channel_layout_copy", unsafe {
+            ff::av_channel_layout_copy(&mut owned.0, layout)
+        })?;
+        Ok(owned)
+    }
+
+    pub(crate) fn matches(&self, other: &ff::AVChannelLayout) -> bool {
+        unsafe { ff::av_channel_layout_compare(&self.0, other) == 0 }
+    }
+}
+
+impl AsRef<ff::AVChannelLayout> for OwnedChannelLayout {
+    fn as_ref(&self) -> &ff::AVChannelLayout {
+        &self.0
+    }
+}
+
+impl Drop for OwnedChannelLayout {
+    fn drop(&mut self) {
+        unsafe { ff::av_channel_layout_uninit(&mut self.0) };
+    }
+}
+
+/// Owning wrapper around an `SwrContext`.
+pub(crate) struct OwnedSwr(*mut ff::SwrContext);
+
+impl OwnedSwr {
+    /// Allocates and initializes a resampling context converting between
+    /// the given formats.
+    pub(crate) fn new(
+        out_layout: &ff::AVChannelLayout,
+        out_format: ff::AVSampleFormat,
+        out_rate: c_int,
+        in_layout: &ff::AVChannelLayout,
+        in_format: ff::AVSampleFormat,
+        in_rate: c_int,
+    ) -> Result<Self> {
+        // wrapped from the first moment, so a failed init still frees
+        // whatever swr_alloc_set_opts2 allocated
+        let mut swr = Self(std::ptr::null_mut());
+        check("swr_alloc_set_opts2", unsafe {
+            ff::swr_alloc_set_opts2(
+                &mut swr.0,
+                out_layout,
+                out_format,
+                out_rate,
+                in_layout,
+                in_format,
+                in_rate,
+                0,
+                std::ptr::null_mut(),
+            )
+        })?;
+        check("swr_init", unsafe { ff::swr_init(swr.0) })?;
+        Ok(swr)
+    }
+
+    /// Upper bound on the samples buffered inside the resampler, in units
+    /// of `1 / base` (pass the input rate to count input samples).
+    pub(crate) fn delay(&self, base: i64) -> i64 {
+        unsafe { ff::swr_get_delay(self.0, base) }
+    }
+
+    /// # Safety
+    /// `out` must point to writable planes with room for `out_count`
+    /// samples in the output format; `input` must point to readable planes
+    /// holding `in_count` samples in the input format.
+    pub(crate) unsafe fn convert(
+        &mut self,
+        out: *const *mut u8,
+        out_count: c_int,
+        input: *const *const u8,
+        in_count: c_int,
+    ) -> Result<c_int> {
+        check("swr_convert", unsafe {
+            ff::swr_convert(self.0, out, out_count, input, in_count)
+        })
+    }
+}
+
+impl Drop for OwnedSwr {
+    fn drop(&mut self) {
+        unsafe { ff::swr_free(&mut self.0) };
+    }
+}
+
 /// Owning wrapper around an `AVPacket`.
 pub(crate) struct OwnedPacket(*mut ff::AVPacket);
 
