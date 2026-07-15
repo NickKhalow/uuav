@@ -6,10 +6,10 @@ use std::sync::Once;
 use std::thread;
 
 use super::audio_playback::{AudioPlayback, AudioReader};
-use super::command::{PLAYBACK_POLL, ReadOnlyCancelToken, SeekSlot};
 use super::input::Input;
 use super::report;
-use super::transport::{PlaybackState, Transport};
+use super::transport::{AtomicTransport, PlaybackState};
+use super::util::{AtomicSeekSlot, PLAYBACK_POLL, ReadOnlyCancelToken};
 use super::video_playback::{VideoPlayback, VideoQueue, VideoReader};
 use crate::ffutil::{OwnedPacket, av_err, check};
 use crate::hw_device::{HwDevice, HwDeviceContext};
@@ -41,9 +41,9 @@ pub(crate) struct PlaybackUnit {
     url: String,
     cancel: ReadOnlyCancelToken,
     /// Coalescing seek command; the playback thread services it.
-    seek: SeekSlot,
+    seek: AtomicSeekSlot,
     /// Playback state and media clock, as one atomic snapshot.
-    transport: Transport,
+    transport: AtomicTransport,
     /// Audio-thread half of the playback's audio; the pipeline's
     /// [`AudioPlayback`] feeds it.
     audio: AudioReader,
@@ -95,8 +95,7 @@ impl PlaybackUnit {
             let par = input.stream_at(video_index).codecpar();
             let (width, height) = unsafe { ((*par).width, (*par).height) };
             let size = VideoSize {
-                width: u32::try_from(width)
-                    .map_err(|_| anyhow!("invalid video width: {width}"))?,
+                width: u32::try_from(width).map_err(|_| anyhow!("invalid video width: {width}"))?,
                 height: u32::try_from(height)
                     .map_err(|_| anyhow!("invalid video height: {height}"))?,
             };
@@ -120,8 +119,8 @@ impl PlaybackUnit {
             duration: input.duration(),
             video_size,
             cancel,
-            seek: SeekSlot::new(),
-            transport: Transport::new(),
+            seek: AtomicSeekSlot::new(),
+            transport: AtomicTransport::new(),
             audio: audio_reader,
             video: video_reader,
             hw_ctx,
@@ -139,14 +138,13 @@ impl PlaybackUnit {
         Ok((unit, pipeline))
     }
 
-    /// [playback thread] Demuxes and decodes until the player cancels;
-    /// runtime errors flag ERROR and go through the error callback.
-    pub(crate) fn run_blocking(&self, pipeline: Pipeline) {
-        if let Err(e) = self.run(pipeline)
-            && !self.cancel.is_cancelled()
-        {
-            self.transport.set_error();
-            report(self.error_callback, &e.to_string());
+    /// [playback thread] Demuxes and decodes until the player cancels.
+    /// A cancelled run is a clean exit; a runtime error propagates to the
+    /// player, which retires this unit.
+    pub(crate) fn run_blocking(&self, pipeline: Pipeline) -> Result<()> {
+        match self.run(pipeline) {
+            Err(e) if !self.cancel.is_cancelled() => Err(e),
+            Err(_) | Ok(()) => Ok(()),
         }
     }
 
@@ -263,58 +261,41 @@ impl PlaybackUnit {
         self.transport.state().into()
     }
 
-    pub(crate) fn play(&self) -> Result<()> {
+    pub(crate) fn play(&self) {
         match self.transport.state() {
             PlaybackState::Ready | PlaybackState::Paused => {}
-            PlaybackState::Playing => return Ok(()),
+            PlaybackState::Playing => return,
             PlaybackState::Ended => {
                 // restart from the beginning
                 self.seek.request(0.0);
             }
-            PlaybackState::Error => return Err(anyhow!("no media open")),
         }
         self.transport.play();
-        Ok(())
     }
 
-    pub(crate) fn pause(&self) -> Result<()> {
+    pub(crate) fn pause(&self) {
         match self.transport.state() {
-            PlaybackState::Playing => {
-                self.transport.pause();
-                Ok(())
-            }
-            PlaybackState::Ready | PlaybackState::Paused | PlaybackState::Ended => Ok(()),
-            PlaybackState::Error => Err(anyhow!("no media open")),
+            PlaybackState::Playing => self.transport.pause(),
+            PlaybackState::Ready | PlaybackState::Paused | PlaybackState::Ended => {}
         }
     }
 
-    pub(crate) fn seek_intent(&self, time: f64) -> Result<()> {
-        if !self.transport.media_open() {
-            return Err(anyhow!("no media open"));
-        }
+    pub(crate) fn seek_intent(&self, time: f64) {
         self.seek.request(time.max(0.0));
-        Ok(())
     }
 
     pub(crate) const fn duration(&self) -> Option<f64> {
         self.duration
     }
 
-    pub(crate) fn current_time(&self) -> Option<f64> {
-        if !self.transport.media_open() {
-            return None;
-        }
+    pub(crate) fn current_time(&self) -> f64 {
         let now = self.transport.now();
-        Some(self.duration.map_or(now, |d| now.clamp(0.0, d)))
+        self.duration.map_or(now, |d| now.clamp(0.0, d))
     }
 
     /// The playback slaves itself to the externally provided master clock.
-    pub(crate) fn assign_master_clock(&self, current_time: f64) -> Result<()> {
-        if !self.transport.media_open() {
-            return Err(anyhow!("no media open"));
-        }
+    pub(crate) fn assign_master_clock(&self, current_time: f64) {
         self.transport.sync_to_master(current_time);
-        Ok(())
     }
 
     pub(crate) fn video_size(&self) -> Option<VideoSize> {
