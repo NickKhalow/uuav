@@ -1,8 +1,10 @@
 //! Lock-free SPSC audio ring
 
+use parking_lot::Mutex;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use crate::AudioOptions;
 
@@ -35,7 +37,48 @@ pub(super) enum ClockSync {
     EmitSilence,
 }
 
-pub(super) fn channel(audio_options: AudioOptions) -> (AudioSender, AudioReceiver) {
+/// Slot through which the receiver half is handed to the audio thread.
+pub(super) type SharedAudioReceiver = Arc<Mutex<Option<AudioReceiver>>>;
+
+/// The worker's grip on the whole ring: the sender half it fills, paired
+/// with the slot its receiver half was published into. Both halves are
+/// created and replaced together, so they always originate from the same
+/// ring.
+pub(super) struct AudioRing {
+    tx: AudioSender,
+    rx_slot: SharedAudioReceiver,
+}
+
+impl AudioRing {
+    /// Creates a ring for `audio_options` and publishes its receiver into
+    /// `rx_slot`.
+    pub(super) fn new(audio_options: AudioOptions, rx_slot: SharedAudioReceiver) -> Self {
+        let (tx, rx) = split(audio_options);
+        *rx_slot.lock() = Some(rx);
+        Self { tx, rx_slot }
+    }
+
+    /// Replaces both halves with a fresh ring for `audio_options`,
+    /// discarding whatever the old ring still buffered.
+    pub(super) fn replace(&mut self, audio_options: AudioOptions) {
+        let (tx, rx) = split(audio_options);
+        self.tx = tx;
+        *self.rx_slot.lock() = Some(rx);
+    }
+
+    /// Appends a decoded frame when the ring has room. An empty ring always
+    /// accepts, so an oversized frame cannot deadlock the pipeline.
+    pub(super) fn try_extend(&mut self, pts: Option<f64>, samples: &[f32]) -> bool {
+        self.tx.try_extend(pts, samples)
+    }
+
+    /// Whether the receiver has consumed everything pushed so far.
+    pub(super) fn is_drained(&self) -> bool {
+        self.tx.is_drained()
+    }
+}
+
+fn split(audio_options: AudioOptions) -> (AudioSender, AudioReceiver) {
     let per_second = (audio_options.sample_rate.get() as usize)
         .saturating_mul(audio_options.channels_usize().get());
     let capacity = (per_second as f64 * AUDIO_BUFFER_SECONDS) as usize;
@@ -61,7 +104,7 @@ pub(super) fn channel(audio_options: AudioOptions) -> (AudioSender, AudioReceive
 }
 
 /// Worker-side half: pushes decoded samples and their timestamps.
-pub(super) struct AudioSender {
+struct AudioSender {
     samples: HeapProd<f32>,
     markers: HeapProd<PtsMarker>,
     /// Interleaved samples pushed since creation; stream position of the
@@ -70,9 +113,7 @@ pub(super) struct AudioSender {
 }
 
 impl AudioSender {
-    /// Appends a decoded frame when the ring has room. An empty ring always
-    /// accepts, so an oversized frame cannot deadlock the pipeline.
-    pub(super) fn try_extend(&mut self, pts: Option<f64>, samples: &[f32]) -> bool {
+    fn try_extend(&mut self, pts: Option<f64>, samples: &[f32]) -> bool {
         if self.samples.vacant_len() < samples.len() && !self.samples.is_empty() {
             return false;
         }
@@ -91,8 +132,7 @@ impl AudioSender {
         true
     }
 
-    /// Whether the receiver has consumed everything pushed so far.
-    pub(super) fn is_drained(&self) -> bool {
+    fn is_drained(&self) -> bool {
         self.samples.is_empty()
     }
 }
