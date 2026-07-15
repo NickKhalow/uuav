@@ -112,6 +112,10 @@ impl AudioOptions {
         // SAFETY the channels value is checked at the construction
         unsafe { NonZeroUsize::new_unchecked(self.channels.get() as usize) }
     }
+
+    fn sample_rate_f64(&self) -> f64 {
+f64::from(self.sample_rate.get())
+    }
 }
 
 impl TryFrom<AudioOptionsRaw> for AudioOptions {

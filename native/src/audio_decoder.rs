@@ -88,20 +88,22 @@ impl Resampler {
         let in_samples = frame.nb_samples();
         let delay = self.swr.apply_delay_and_modify(i64::from(in_rate));
 
-        // generous headroom over the exact rescale to absorb rounding
-        let out_capacity = (((delay as f64 + f64::from(in_samples))
-            * f64::from(self.output.sample_rate)
-            / f64::from(in_rate))
-        .ceil()
-            + 32.0) as c_int;
+        let out_capacity: c_int = {
+            let pending_in_samples = delay as f64 + f64::from(in_samples);
+            let rate_ratio = self.output.sample_rate_f64() / f64::from(in_rate);
+            let exact_out_samples = pending_in_samples * rate_ratio;
+            // generous headroom over the exact rescale to absorb rounding
+            (exact_out_samples.ceil() + 32.0) as c_int
+        };
 
-        // AudioOptions is sanitized at the FFI boundary: always positive
-        let channels = self.output.channels as usize;
+        let channels = self.output.channels_usize();
         let out_capacity_usize =
             usize::try_from(out_capacity).context("negative resampler output capacity")?;
-        let mut samples = vec![0.0_f32; out_capacity_usize * channels];
+
+        let mut samples = vec![0.0_f32; out_capacity_usize * channels.get()];
 
         let out_planes = [samples.as_mut_ptr().cast::<u8>()];
+
         // SAFETY: `samples` has room for `out_capacity` interleaved output
         // samples; the frame's planes hold `in_samples` input samples
         let converted = unsafe {
@@ -114,7 +116,7 @@ impl Resampler {
         }?;
 
         samples.truncate(
-            usize::try_from(converted).context("negative converted sample count")? * channels,
+            usize::try_from(converted).context("negative converted sample count")? * channels.get(),
         );
         Ok(samples)
     }
