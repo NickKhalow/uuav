@@ -36,7 +36,7 @@
 mod audio_decoder;
 mod ffutil;
 mod hw_device;
-mod playback_unit;
+mod playback;
 mod player;
 mod video_decoder;
 mod video_output;
