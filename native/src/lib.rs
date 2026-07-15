@@ -114,7 +114,7 @@ impl AudioOptions {
     }
 
     fn sample_rate_f64(&self) -> f64 {
-f64::from(self.sample_rate.get())
+        f64::from(self.sample_rate.get())
     }
 }
 
