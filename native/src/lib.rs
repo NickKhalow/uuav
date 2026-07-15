@@ -47,6 +47,7 @@ use hw_device::HwDevice;
 use player::UUAVPlayer;
 use std::{
     ffi::{CStr, CString},
+    num::{NonZeroI32, NonZeroUsize},
     os::raw::{c_char, c_void},
     ptr,
     sync::{Arc, atomic::AtomicU64},
@@ -101,8 +102,16 @@ pub struct AudioOptionsRaw {
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct AudioOptions {
-    pub sample_rate: i32,
-    pub channels: i32,
+    pub sample_rate: NonZeroI32,
+    pub channels: NonZeroI32,
+}
+
+impl AudioOptions {
+    // AudioOptions is sanitized at the FFI boundary: always positive
+    fn channels_usize(&self) -> NonZeroUsize {
+        // SAFETY the channels value is checked at the construction
+        unsafe { NonZeroUsize::new_unchecked(self.channels.get() as usize) }
+    }
 }
 
 impl TryFrom<AudioOptionsRaw> for AudioOptions {
@@ -119,10 +128,15 @@ impl TryFrom<AudioOptionsRaw> for AudioOptions {
             "channels must be positive, got {}",
             raw.channels
         );
-        Ok(Self {
-            sample_rate: raw.sample_rate,
-            channels: raw.channels,
-        })
+
+        unsafe {
+            let sample_rate = NonZeroI32::new_unchecked(raw.sample_rate);
+            let channels = NonZeroI32::new_unchecked(raw.channels);
+            Ok(Self {
+                sample_rate,
+                channels,
+            })
+        }
     }
 }
 
