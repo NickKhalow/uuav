@@ -125,9 +125,9 @@ impl VideoOutput {
                 unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut created)) }
                     .map_err(|e| anyhow!("CreateTexture2D(NV12 {width}x{height}) failed: {e}"))?;
 
-                let created = created.ok_or_else(
-                    || anyhow!("CreateTexture2D(NV12 {width}x{height}) returned no texture"),
-                )?;
+                let created = created.ok_or_else(|| {
+                    anyhow!("CreateTexture2D(NV12 {width}x{height}) returned no texture")
+                })?;
                 SizedTexture {
                     texture: created,
                     width,
