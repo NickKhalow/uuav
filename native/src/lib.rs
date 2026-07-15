@@ -157,9 +157,9 @@ impl From<AudioOptions> for AudioOptionsRaw {
 /// Read-only view of the engine's audio output configuration
 /// For internal look-ups
 #[derive(Clone)]
-pub(crate) struct AudioOutConfig(Arc<ArcSwap<AudioOptions>>);
+pub(crate) struct AudioOptionsView(Arc<ArcSwap<AudioOptions>>);
 
-impl AudioOutConfig {
+impl AudioOptionsView {
     pub(crate) fn current(&self) -> AudioOptions {
         **self.0.load()
     }
@@ -360,7 +360,7 @@ pub extern "C" fn uuav_player_new() -> NewPlayerResult {
 
     let player = UUAVPlayer::new(
         s.device.clone(),
-        AudioOutConfig(Arc::clone(&s.audio_options)),
+        AudioOptionsView(Arc::clone(&s.audio_options)),
         s.error_callback,
     );
     let next_id = NEXT_STREAM_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
