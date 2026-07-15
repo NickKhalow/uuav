@@ -108,12 +108,12 @@ pub struct AudioOptions {
 
 impl AudioOptions {
     // AudioOptions is sanitized at the FFI boundary: always positive
-    fn channels_usize(&self) -> NonZeroUsize {
+    const fn channels_usize(self) -> NonZeroUsize {
         // SAFETY the channels value is checked at the construction
         unsafe { NonZeroUsize::new_unchecked(self.channels.get() as usize) }
     }
 
-    fn sample_rate_f64(&self) -> f64 {
+    fn sample_rate_f64(self) -> f64 {
         f64::from(self.sample_rate.get())
     }
 }
