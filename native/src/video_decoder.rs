@@ -3,7 +3,9 @@ use ffmpeg_sys_next as ff;
 use std::os::raw::{c_int, c_void};
 use std::ptr;
 
-use crate::ffutil::{AVERROR_EAGAIN, Decoded, OwnedDecoder, OwnedFrame, Stream, av_err, check, q2d};
+use crate::ffutil::{
+    AVERROR_EAGAIN, Decoded, OwnedDecoder, OwnedFrame, Stream, av_err, check, q2d,
+};
 use crate::hw_device::HwDeviceContext;
 
 /// A decoded D3D11VA frame. The underlying decoder surface stays alive

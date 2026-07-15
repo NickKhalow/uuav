@@ -99,8 +99,11 @@ impl Resampler {
         let channels = self.output.channels_usize();
         let out_capacity_usize =
             usize::try_from(out_capacity).context("negative resampler output capacity")?;
+        let out_len = out_capacity_usize
+            .checked_mul(channels.get())
+            .context("resampler output size overflows usize")?;
 
-        let mut samples = vec![0.0_f32; out_capacity_usize * channels.get()];
+        let mut samples = vec![0.0_f32; out_len];
 
         let out_planes = [samples.as_mut_ptr().cast::<u8>()];
 
@@ -115,9 +118,11 @@ impl Resampler {
             )
         }?;
 
-        samples.truncate(
-            usize::try_from(converted).context("negative converted sample count")? * channels.get(),
-        );
+        let converted_len = usize::try_from(converted)
+            .context("negative converted sample count")?
+            .checked_mul(channels.get())
+            .context("converted sample count overflows usize")?;
+        samples.truncate(converted_len);
         Ok(samples)
     }
 }
@@ -214,7 +219,7 @@ impl AudioDecoder {
     ) -> Result<&mut Resampler> {
         let relevant = match self.resampler.take() {
             Some(resampler) => {
-                if resampler.matches(&frame) {
+                if resampler.matches(frame) {
                     resampler
                 } else {
                     Resampler::new(frame, self.audio_options)?
