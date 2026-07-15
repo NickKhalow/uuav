@@ -70,7 +70,7 @@ pub type PlayerId = u64;
 
 #[allow(non_camel_case_types)]
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum UUAVState {
     UUAV_CLOSED = 0,
     UUAV_OPENING = 1,
