@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 
 use crate::hw_device::HwDevice;
 use crate::playback::{CancelToken, ReadOnlyCancelToken, PlaybackUnit, fill_silence, report};
-use crate::{AudioOutConfig, ErrorCallback, UUAVState, VideoSize};
+use crate::{AudioOptionsView, ErrorCallback, UUAVState, VideoSize};
 
 static PLAYBACK_INDEX: AtomicU64 = AtomicU64::new(1);
 
@@ -43,7 +43,7 @@ impl PlaybackThread {
 /// [`PlaybackUnit`] that thread publishes.
 pub(crate) struct UUAVPlayer {
     device: HwDevice,
-    audio_out: AudioOutConfig,
+    audio_out: AudioOptionsView,
     error_callback: ErrorCallback,
     playback: Arc<ArcSwap<Playback>>,
     thread: Option<PlaybackThread>,
@@ -58,7 +58,7 @@ impl Drop for UUAVPlayer {
 impl UUAVPlayer {
     pub(crate) fn new(
         device: HwDevice,
-        audio_out: AudioOutConfig,
+        audio_out: AudioOptionsView,
         error_callback: ErrorCallback,
     ) -> Self {
         Self {
