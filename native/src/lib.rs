@@ -36,6 +36,7 @@
 mod audio_decoder;
 mod ffutil;
 mod hw_device;
+mod playback_unit;
 mod player;
 mod video_decoder;
 mod video_output;
@@ -150,6 +151,17 @@ impl From<AudioOptions> for AudioOptionsRaw {
             sample_rate: options.sample_rate.get(),
             channels: options.channels.get(),
         }
+    }
+}
+
+/// Read-only view of the engine's audio output configuration
+/// For internal look-ups
+#[derive(Clone)]
+pub(crate) struct AudioOutConfig(Arc<ArcSwap<AudioOptions>>);
+
+impl AudioOutConfig {
+    pub(crate) fn current(&self) -> AudioOptions {
+        **self.0.load()
     }
 }
 
@@ -348,7 +360,7 @@ pub extern "C" fn uuav_player_new() -> NewPlayerResult {
 
     let player = UUAVPlayer::new(
         s.device.clone(),
-        Arc::clone(&s.audio_options),
+        AudioOutConfig(Arc::clone(&s.audio_options)),
         s.error_callback,
     );
     let next_id = NEXT_STREAM_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -423,7 +435,8 @@ pub extern "C" fn uuav_player_close_media(player_id: PlayerId) -> ResultFFI {
 fn uuav_player_close_media_internal(player_id: PlayerId) -> anyhow::Result<()> {
     let state = INIT_STATE.load();
     let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
-    runtime.player_by_id_mut(player_id)?.close_media()
+    runtime.player_by_id_mut(player_id)?.close_media();
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
