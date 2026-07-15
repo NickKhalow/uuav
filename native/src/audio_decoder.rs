@@ -5,7 +5,10 @@ use std::os::raw::c_int;
 use std::ptr;
 
 use crate::AudioOptions;
-use crate::ffutil::{AVERROR_EAGAIN, Decoded, OwnedDecoder, OwnedFrame, Stream, av_err, check, q2d};
+use crate::ffutil::{
+    AVERROR_EAGAIN, Decoded, OwnedChannelLayout, OwnedDecoder, OwnedFrame, OwnedSwr, Stream,
+    av_err, check, q2d,
+};
 
 /// Interleaved f32 samples in the configured output format.
 pub(crate) struct AudioFrame {
@@ -30,74 +33,43 @@ impl AudioFrame {
 struct SwrInput {
     format: c_int,
     rate: c_int,
-    layout: ff::AVChannelLayout,
+    layout: OwnedChannelLayout,
 }
 
 impl SwrInput {
     fn from_frame_options(frame: &OwnedFrame) -> Result<Self> {
-        let mut input = SwrInput {
+        Ok(Self {
             format: frame.format(),
             rate: frame.sample_rate(),
-            layout: unsafe { mem::zeroed() },
-        };
-        check("av_channel_layout_copy", unsafe {
-            ff::av_channel_layout_copy(&mut input.layout, frame.ch_layout())
-        })?;
-
-        Ok(input)
-    }
-}
-
-impl Drop for SwrInput {
-    fn drop(&mut self) {
-        unsafe { ff::av_channel_layout_uninit(&mut self.layout) };
+            layout: OwnedChannelLayout::copied_from(frame.ch_layout())?,
+        })
     }
 }
 
 /// Resampler converting decoded frames to interleaved `f32` at the output
-/// rate and channel count it was built for. Owns the `SwrContext` and the
-/// input description; both are released on drop.
+/// rate and channel count it was built for
 struct Resampler {
-    swr: *mut ff::SwrContext, // TODO Looks like SwrContext should be a separate wrapped type and it
-                              // should own its creation cycle. It such case the comment "constructed before the fallible calls so a failed init still frees whatever swr_alloc_set_opts2 allocated" will become structurally redundant
+    swr: OwnedSwr,
     input: SwrInput,
     output: AudioOptions,
 }
 
 impl Resampler {
-
     /// Builds a resampler converting from the frame's sample format to
     /// interleaved `f32` at `output`.
     fn new(frame: &OwnedFrame, output: AudioOptions) -> Result<Self> {
-        // constructed before the fallible calls so a failed init still
-        // frees whatever swr_alloc_set_opts2 allocated
-        let mut resampler = Self {
-            swr: ptr::null_mut(),
-            input: SwrInput::from_frame_options(frame)?,
-            output,
-        };
+        let input = SwrInput::from_frame_options(frame)?;
+        let out_layout = OwnedChannelLayout::default_for(output.channels);
+        let swr = OwnedSwr::new(
+            out_layout.as_ref(),
+            ff::AVSampleFormat::AV_SAMPLE_FMT_FLT,
+            output.sample_rate,
+            frame.ch_layout(),
+            unsafe { mem::transmute::<c_int, ff::AVSampleFormat>(input.format) },
+            input.rate,
+        )?;
 
-        unsafe {
-            let mut out_layout: ff::AVChannelLayout = mem::zeroed();
-            ff::av_channel_layout_default(&mut out_layout, output.channels);
-
-            let ret = ff::swr_alloc_set_opts2(
-                &mut resampler.swr,
-                &out_layout,
-                ff::AVSampleFormat::AV_SAMPLE_FMT_FLT,
-                output.sample_rate,
-                frame.ch_layout(),
-                mem::transmute::<c_int, ff::AVSampleFormat>(resampler.input.format),
-                resampler.input.rate,
-                0,
-                ptr::null_mut(),
-            );
-            ff::av_channel_layout_uninit(&mut out_layout);
-            check("swr_alloc_set_opts2", ret)?;
-            check("swr_init", ff::swr_init(resampler.swr))?;
-        }
-
-        Ok(resampler)
+        Ok(Self { swr, input, output })
     }
 
     /// Whether the frame still matches the input this resampler was built
@@ -105,7 +77,7 @@ impl Resampler {
     fn matches(&self, frame: &OwnedFrame) -> bool {
         self.input.format == frame.format()
             && self.input.rate == frame.sample_rate()
-            && unsafe { ff::av_channel_layout_compare(&self.input.layout, frame.ch_layout()) } == 0
+            && self.input.layout.matches(frame.ch_layout())
     }
 
     /// Converts the frame's samples into interleaved `f32` at the output
@@ -113,7 +85,7 @@ impl Resampler {
     fn convert(&mut self, frame: &OwnedFrame) -> Result<Vec<f32>> {
         let in_rate = frame.sample_rate().max(1);
         let in_samples = frame.nb_samples();
-        let delay = unsafe { ff::swr_get_delay(self.swr, i64::from(in_rate)) };
+        let delay = self.swr.delay(i64::from(in_rate));
         // generous headroom over the exact rescale to absorb rounding
         let out_capacity = (((delay as f64 + f64::from(in_samples))
             * f64::from(self.output.sample_rate)
@@ -131,15 +103,16 @@ impl Resampler {
         ];
 
         let out_planes = [samples.as_mut_ptr().cast::<u8>()];
-        let converted = check("swr_convert", unsafe {
-            ff::swr_convert(
-                self.swr,
+        // SAFETY: `samples` has room for `out_capacity` interleaved output
+        // samples; the frame's planes hold `in_samples` input samples
+        let converted = unsafe {
+            self.swr.convert(
                 out_planes.as_ptr(),
                 out_capacity,
                 frame.extended_data(),
                 in_samples,
             )
-        })?;
+        }?;
 
         samples.truncate(
             usize::try_from(converted)
@@ -147,12 +120,6 @@ impl Resampler {
                 .saturating_mul(channels),
         );
         Ok(samples)
-    }
-}
-
-impl Drop for Resampler {
-    fn drop(&mut self) {
-        unsafe { ff::swr_free(&mut self.swr) };
     }
 }
 
