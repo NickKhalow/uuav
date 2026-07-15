@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow};
 use ffmpeg_sys_next as ff;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
+use std::num::NonZeroI32;
 
 /// "Decoder needs more input" return code. FFmpeg has no named define for
 /// it: the C API spells it `AVERROR(EAGAIN)`, with `EAGAIN` coming from the
@@ -198,9 +199,9 @@ pub(crate) struct OwnedChannelLayout(ff::AVChannelLayout);
 
 impl OwnedChannelLayout {
     /// Native layout for the given channel count.
-    pub(crate) fn default_for(channels: c_int) -> Self {
+    pub(crate) fn default_for(channels: NonZeroI32) -> Self {
         let mut layout: ff::AVChannelLayout = unsafe { std::mem::zeroed() };
-        unsafe { ff::av_channel_layout_default(&mut layout, channels) };
+        unsafe { ff::av_channel_layout_default(&mut layout, channels.get()) };
         Self(layout)
     }
 
@@ -239,7 +240,7 @@ impl OwnedSwr {
     pub(crate) fn new(
         out_layout: &ff::AVChannelLayout,
         out_format: ff::AVSampleFormat,
-        out_rate: c_int,
+        out_rate: NonZeroI32,
         in_layout: &ff::AVChannelLayout,
         in_format: ff::AVSampleFormat,
         in_rate: c_int,
@@ -252,7 +253,7 @@ impl OwnedSwr {
                 &mut swr.0,
                 out_layout,
                 out_format,
-                out_rate,
+                out_rate.get(),
                 in_layout,
                 in_format,
                 in_rate,
