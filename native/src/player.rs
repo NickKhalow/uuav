@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 
 use crate::hw_device::HwDevice;
-use crate::playback::{CancelToken, ReadOnlyCancelToken, PlaybackUnit, fill_silence, report};
+use crate::playback::{CancelToken, PlaybackUnit, ReadOnlyCancelToken, fill_silence, report};
 use crate::{AudioOptionsView, ErrorCallback, UUAVState, VideoSize};
 
 static PLAYBACK_INDEX: AtomicU64 = AtomicU64::new(1);
@@ -17,7 +17,8 @@ enum Playback {
     Closed,
     /// The playback thread exists but has not opened the media yet.
     Opening,
-    /// The open failed; the error already went through the callback.
+    /// The open or the playback failed; the error already went through
+    /// the callback and the unit is gone.
     Failed,
     /// The media is open; the playback thread runs this unit.
     Active(Arc<PlaybackUnit>),
@@ -88,17 +89,15 @@ impl UUAVPlayer {
                 let audio_out = self.audio_out.clone();
                 let error_callback = self.error_callback;
                 move || {
-                    match PlaybackUnit::open(
-                        url,
-                        device,
-                        audio_out,
-                        cancel.clone(),
-                        error_callback,
-                    ) {
+                    match PlaybackUnit::open(url, device, audio_out, cancel.clone(), error_callback)
+                    {
                         Ok((unit, pipeline)) => {
                             let unit = Arc::new(unit);
                             playback.store(Arc::new(Playback::Active(Arc::clone(&unit))));
-                            unit.run_blocking(pipeline);
+                            if let Err(e) = unit.run_blocking(pipeline) {
+                                report(error_callback, &e.to_string());
+                                playback.store(Arc::new(Playback::Failed));
+                            }
                         }
                         Err(e) => {
                             // a cancelled open is a close, not a failure
@@ -145,16 +144,19 @@ impl UUAVPlayer {
     }
 
     pub(crate) fn play(&self) -> Result<()> {
-        self.active_unit()?.play()
+        self.active_unit()?.play();
+        Ok(())
     }
 
     pub(crate) fn pause(&self) -> Result<()> {
-        self.active_unit()?.pause()
+        self.active_unit()?.pause();
+        Ok(())
     }
 
     // not blocking
     pub(crate) fn seek_intent(&self, time: f64) -> Result<()> {
-        self.active_unit()?.seek_intent(time)
+        self.active_unit()?.seek_intent(time);
+        Ok(())
     }
 
     pub(crate) fn state(&self) -> UUAVState {
@@ -171,12 +173,13 @@ impl UUAVPlayer {
     }
 
     pub(crate) fn current_time(&self) -> Option<f64> {
-        self.unit()?.current_time()
+        Some(self.unit()?.current_time())
     }
 
     // the player slaves its playback to the externally provided master clock
     pub(crate) fn assign_master_clock(&self, current_time: f64) -> Result<()> {
-        self.active_unit()?.assign_master_clock(current_time)
+        self.active_unit()?.assign_master_clock(current_time);
+        Ok(())
     }
 
     pub(crate) fn video_size(&self) -> Option<VideoSize> {
