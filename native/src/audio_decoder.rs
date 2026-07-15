@@ -192,22 +192,40 @@ impl AudioDecoder {
         }
         check("avcodec_receive_frame(audio)", ret)?;
 
-        // reuse the resampler while the input matches; rebuilding is rare,
-        // but legal mid-stream
-        let resampler = match self.resampler.take() {
-            Some(resampler) if resampler.matches(&frame) => resampler,
-            _ => Resampler::new(&frame, self.audio_options)?,
-        };
-        let samples = self.resampler.insert(resampler).convert(&frame)?;
+        let resampler = self.relevant_resampler_for_frame_or_new(&frame)?;
+        let samples = resampler.convert(&frame)?;
 
         let ts = frame.best_effort_timestamp();
-        let pts = if ts == ff::AV_NOPTS_VALUE {
-            None
-        } else {
-            Some(ts as f64 * q2d(self.time_base))
-        };
+        let pts = self.pts_from_timestamp(ts);
 
         Ok(Decoded::Frame(AudioFrame { pts, samples }))
+    }
+
+    const fn pts_from_timestamp(&self, timestamp: i64) -> Option<f64> {
+        if timestamp == ff::AV_NOPTS_VALUE {
+            None
+        } else {
+            Some(timestamp as f64 * q2d(self.time_base))
+        }
+    }
+
+    fn relevant_resampler_for_frame_or_new(
+        &mut self,
+        frame: &OwnedFrame,
+    ) -> Result<&mut Resampler> {
+        let relevant = match self.resampler.take() {
+            Some(resampler) => {
+                if resampler.matches(&frame) {
+                    resampler
+                } else {
+                    Resampler::new(frame, self.audio_options)?
+                }
+            }
+            None => Resampler::new(frame, self.audio_options)?,
+        };
+
+        let relevant = self.resampler.insert(relevant);
+        Ok(relevant)
     }
 
     pub(crate) fn flush(&mut self) {
