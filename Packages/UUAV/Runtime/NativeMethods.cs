@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using UnityEngine;
 
 namespace UUAV
 {
@@ -19,11 +20,53 @@ namespace UUAV
         Unknown,
     }
 
+    public static class UUAVStateExtensions
+    {
+        public static string ToStringNoAlloc(this UUAVState state)
+        {
+            return state switch
+            {
+                UUAVState.Closed => "Closed",
+                UUAVState.Opening => "Opening",
+                UUAVState.Ready => "Ready",
+                UUAVState.Playing => "Playing",
+                UUAVState.Paused => "Paused",
+                UUAVState.Ended => "Ended",
+                UUAVState.Error => "Error",
+                UUAVState.Unknown => "Unknown",
+                _ => throw new ArgumentOutOfRangeException(nameof(state), state, null)
+            };
+        }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct AudioOptions
     {
         public int SampleRate;
         public int Channels;
+
+        public static AudioOptions FromConfig(AudioConfiguration config)
+        {
+            return new AudioOptions
+            {
+                SampleRate = config.sampleRate,
+                Channels = ChannelCount(config.speakerMode),
+            };
+        }
+
+        private static int ChannelCount(AudioSpeakerMode mode)
+        {
+            return mode switch
+            {
+                AudioSpeakerMode.Mono => 1,
+                AudioSpeakerMode.Stereo => 2,
+                AudioSpeakerMode.Quad => 4,
+                AudioSpeakerMode.Surround => 5,
+                AudioSpeakerMode.Mode5point1 => 6,
+                AudioSpeakerMode.Mode7point1 => 8,
+                _ => 2
+            };
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -40,7 +83,15 @@ namespace UUAV
         private readonly byte initialized;
         public AudioOptions AudioOptions;
 
+        // allocated by the native side; release via ConsumeError
+        public IntPtr DeviceRemoveReason;
+
         public bool Initialized => initialized != 0;
+
+        public string? ConsumeDeviceRemoveReason()
+        {
+            return Utf8.ConsumeCString(ref DeviceRemoveReason);
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -56,10 +107,7 @@ namespace UUAV
         // reads the message and frees it on the native side; call at most once
         public string? ConsumeError()
         {
-            var message = Utf8.PtrToString(ErrorMessage);
-            NativeMethods.uuav_string_free(ErrorMessage);
-            ErrorMessage = IntPtr.Zero;
-            return message;
+            return Utf8.ConsumeCString(ref ErrorMessage);
         }
     }
 
@@ -74,10 +122,7 @@ namespace UUAV
         // reads the message and frees it on the native side; call at most once
         public string? ConsumeError()
         {
-            var message = Utf8.PtrToString(ErrorMessage);
-            NativeMethods.uuav_string_free(ErrorMessage);
-            ErrorMessage = IntPtr.Zero;
-            return message;
+            return Utf8.ConsumeCString(ref ErrorMessage);
         }
     }
 
@@ -228,6 +273,14 @@ namespace UUAV
             Marshal.Copy(bytes, 0, ptr, bytes.Length);
             Marshal.WriteByte(ptr, bytes.Length, 0);
             return ptr;
+        }
+
+        public static string? ConsumeCString(ref IntPtr ptr)
+        {
+            var message = Utf8.PtrToString(ptr);
+            NativeMethods.uuav_string_free(ptr);
+            ptr = IntPtr.Zero;
+            return message;
         }
     }
 }

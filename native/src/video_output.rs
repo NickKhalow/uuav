@@ -101,9 +101,9 @@ impl VideoOutput {
     fn ensure_texture(&mut self, width: u32, height: u32) -> Result<&ID3D11Texture2D> {
         let texture = match self.texture.take() {
             Some(existing) if existing.matches(width, height) => existing,
-            // TODO how to notify the consumer?
-            // the previous texture was released by `take`; the consumer
-            // re-queries the pointer after a resolution change
+            // TODO push a resolution-change notification to the consumer;
+            // for now C# polls texture ptr + size each frame (UUAVPlayer)
+            // and re-wraps after the pointer changes
             _ => {
                 let desc = D3D11_TEXTURE2D_DESC {
                     Width: width,

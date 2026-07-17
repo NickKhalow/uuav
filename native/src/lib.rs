@@ -112,6 +112,7 @@ pub struct Status {
     pub players_count: u64,
     pub initialized: bool,
     pub audio_options: AudioOptionsRaw,
+    pub device_remove_reason: *const c_char,
 }
 
 /// Untrusted external input, must never be used for internals.
@@ -358,10 +359,17 @@ pub extern "C" fn uuav_status() -> Status {
         let audio_options = (**s.audio_options.load()).into();
         let players_count = s.registry.len() as u64;
 
+        let device_remove_reason = match unsafe {s.device.device().GetDeviceRemovedReason()}
+        {
+            Ok(()) => ptr::null(),
+            Err(e) => string_to_c_bytes(e.to_string())
+        };
+
         Status {
             players_count,
             initialized: true,
             audio_options,
+            device_remove_reason,
         }
     } else {
         Status::default()

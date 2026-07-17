@@ -111,6 +111,8 @@ impl UUAVPlayer {
     // not blocking
     // async, returns immediately
     pub(crate) fn open_media_intent(&mut self, url: String) -> Result<()> {
+        const ATTEMPTS : u32 = 100;
+
         self.close_media();
 
         let cancel = CancelToken::new();
@@ -119,7 +121,7 @@ impl UUAVPlayer {
         let mut payload: OpenIntent = (url, cancel.into());
 
         // Send, discard the oldest one if exists
-        loop {
+        for _ in 0..ATTEMPTS {
             match self.sender_open_intent.try_send(payload) {
                 Ok(()) => return Ok(()),
                 Err(TrySendError::Full(recovery)) => {
@@ -133,6 +135,8 @@ impl UUAVPlayer {
                 }
             }
         }
+
+        Err(anyhow!("Ran out of attempts: {ATTEMPTS}"))
     }
 
     pub(crate) fn close_media(&mut self) {
