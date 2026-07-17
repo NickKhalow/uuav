@@ -1,6 +1,6 @@
 {
-    "name": "UUAV",
-    "rootNamespace": "UUAV",
+    "name": "UUAVClient",
+    "rootNamespace": "UUAVClient",
     "references": [],
     "includePlatforms": [],
     "excludePlatforms": [],
