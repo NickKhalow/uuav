@@ -47,11 +47,12 @@ use dashmap::DashMap;
 use hw_device::HwDevice;
 use player::UUAVPlayer;
 use std::{
+    convert::AsRef,
     ffi::{CStr, CString},
     num::{NonZeroI32, NonZeroUsize},
     os::raw::{c_char, c_void},
     ptr,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{Arc, Weak, atomic::AtomicU64},
 };
 
 static INIT_STATE: ArcSwapOption<Runtime> = ArcSwapOption::const_empty();
@@ -59,12 +60,32 @@ static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
 struct Runtime {
     device: HwDevice,
-    error_callback: ErrorCallback,
+    error_callback: Arc<RawErrorCallback>,
     audio_options: Arc<ArcSwap<AudioOptions>>,
     registry: DashMap<PlayerId, UUAVPlayer>,
 }
 
-pub type ErrorCallback = extern "C" fn(*const c_char);
+type RawErrorCallback = extern "C" fn(*const c_char);
+
+// no-op when the raw callback is dropped on deinit
+#[derive(Clone)]
+struct ErrorCallback {
+    callback: Weak<RawErrorCallback>,
+}
+
+impl ErrorCallback {
+    pub fn from_raw(callback: Weak<RawErrorCallback>) -> Self {
+        Self { callback }
+    }
+
+    pub fn report(&self, message: impl AsRef<str>) {
+        if let Some(callback) = self.callback.upgrade() {
+            let message: &str = message.as_ref();
+            let c = CString::new(message).unwrap_or_default();
+            callback(c.as_ptr());
+        }
+    }
+}
 
 pub type PlayerId = u64;
 
@@ -194,7 +215,7 @@ impl NewPlayerResult {
         }
     }
 
-    fn error(message: &str) -> Self {
+    fn error(message: impl AsRef<str>) -> Self {
         Self {
             player_id: 0,
             error_message: string_to_c_bytes(message),
@@ -230,8 +251,8 @@ impl<T> From<anyhow::Result<T>> for ResultFFI {
     }
 }
 
-fn string_to_c_bytes(s: &str) -> *const c_char {
-    CString::new(s).unwrap_or_default().into_raw()
+fn string_to_c_bytes(s: impl AsRef<str>) -> *const c_char {
+    CString::new(s.as_ref()).unwrap_or_default().into_raw()
 }
 
 const ERR_NO_RUNTIME: &str = "Runtime is not found";
@@ -278,7 +299,7 @@ pub const extern "C" fn uuav_abi_version() -> *const c_char {
 pub unsafe extern "C" fn uuav_init(
     hw_device: *const c_void,
     audio_options: AudioOptionsRaw,
-    error_callback: Option<ErrorCallback>,
+    error_callback: Option<RawErrorCallback>,
 ) -> ResultFFI {
     if INIT_STATE.load().is_some() {
         return ResultFFI::error("Already initialized");
@@ -304,7 +325,7 @@ pub unsafe extern "C" fn uuav_init(
 
     let new_runtime = Runtime {
         device,
-        error_callback,
+        error_callback: Arc::new(error_callback),
         audio_options: Arc::new(ArcSwap::new(Arc::new(audio_options))),
         registry: DashMap::new(),
     };
@@ -358,15 +379,19 @@ pub extern "C" fn uuav_player_new() -> NewPlayerResult {
         return NewPlayerResult::error(ERR_NO_RUNTIME);
     };
 
-    let player = UUAVPlayer::new(
+    let next_id = NEXT_STREAM_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match UUAVPlayer::new(
+        next_id,
         s.device.clone(),
         AudioOptionsView(Arc::clone(&s.audio_options)),
-        s.error_callback,
-    );
-    let next_id = NEXT_STREAM_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    s.registry.insert(next_id, player);
-
-    NewPlayerResult::ok(next_id)
+        ErrorCallback::from_raw(Arc::downgrade(&s.error_callback)),
+    ) {
+        Ok(player) => {
+            s.registry.insert(next_id, player);
+            NewPlayerResult::ok(next_id)
+        }
+        Err(e) => NewPlayerResult::error(e.to_string()),
+    }
 }
 
 #[unsafe(no_mangle)]

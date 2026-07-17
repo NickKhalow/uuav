@@ -7,7 +7,6 @@ use std::thread;
 
 use super::audio_playback::{AudioPlayback, AudioReader};
 use super::input::Input;
-use super::report;
 use super::transport::{AtomicTransport, PlaybackState};
 use super::util::{AtomicSeekSlot, PLAYBACK_POLL, ReadOnlyCancelToken};
 use super::video_playback::{VideoPlayback, VideoQueue, VideoReader};
@@ -175,10 +174,8 @@ impl PlaybackUnit {
                     target,
                     start_offset,
                 ) {
-                    report(
-                        self.error_callback,
-                        &format!("seek to {target}s failed: {e}"),
-                    );
+                    self.error_callback
+                        .report(format!("seek to {target}s failed: {e}"));
                 }
                 continue;
             }
@@ -327,7 +324,7 @@ impl PlaybackUnit {
             let message = format!("video present failed for {}: {e}", self.url);
             // Exit the guard scope before calling external FFI function
             drop(output);
-            report(self.error_callback, &message);
+            self.error_callback.report(message);
         }
     }
 

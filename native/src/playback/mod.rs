@@ -20,8 +20,6 @@ pub(crate) use unit::PlaybackUnit;
 pub(crate) use util::CancelToken;
 pub(crate) use util::ReadOnlyCancelToken;
 
-use crate::ErrorCallback;
-use std::ffi::CString;
 use std::num::NonZeroUsize;
 
 /// Zero-fills an engine-provided interleaved sample buffer.
@@ -32,9 +30,4 @@ pub(crate) fn fill_silence(dst: *mut f32, frames: usize, channels: NonZeroUsize)
     // the engine guarantees dst holds nb_frames * channels floats
     let out = unsafe { std::slice::from_raw_parts_mut(dst, total) };
     out.fill(0.0);
-}
-
-pub(crate) fn report(callback: ErrorCallback, message: &str) {
-    let c = CString::new(message).unwrap_or_default();
-    callback(c.as_ptr());
 }

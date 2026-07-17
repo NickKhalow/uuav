@@ -2,14 +2,13 @@ use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
 use std::os::raw::c_void;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread::{self, JoinHandle};
+use std::thread::{self};
+
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
 use crate::hw_device::HwDevice;
-use crate::playback::{CancelToken, PlaybackUnit, ReadOnlyCancelToken, fill_silence, report};
+use crate::playback::{CancelToken, PlaybackUnit, ReadOnlyCancelToken, fill_silence};
 use crate::{AudioOptionsView, ErrorCallback, UUAVState, VideoSize};
-
-static PLAYBACK_INDEX: AtomicU64 = AtomicU64::new(1);
 
 /// Lifecycle of the player's playback, shared with the playback thread.
 enum Playback {
@@ -24,30 +23,19 @@ enum Playback {
     Active(Arc<PlaybackUnit>),
 }
 
-/// The playback thread of the currently open media and the token that
-/// stops it.
-struct PlaybackThread {
-    cancel: CancelToken,
-    handle: JoinHandle<()>,
-}
+type Url = String;
 
-impl PlaybackThread {
-    fn stop(self) {
-        self.cancel.cancel();
-        // errors were already reported through the callback
-        let _ = self.handle.join();
-    }
-}
+type OpenIntent = (Url, ReadOnlyCancelToken);
 
 /// Engine-facing player: manages url switching by spawning a fresh
 /// playback thread per opened url and delegates everything else to the
 /// [`PlaybackUnit`] that thread publishes.
 pub(crate) struct UUAVPlayer {
-    device: HwDevice,
     audio_out: AudioOptionsView,
-    error_callback: ErrorCallback,
     playback: Arc<ArcSwap<Playback>>,
-    thread: Option<PlaybackThread>,
+    sender_open_intent: Sender<OpenIntent>,
+    receiver_open_intent: Receiver<OpenIntent>,
+    last_cancel_token: Option<CancelToken>,
 }
 
 impl Drop for UUAVPlayer {
@@ -58,16 +46,65 @@ impl Drop for UUAVPlayer {
 
 impl UUAVPlayer {
     pub(crate) fn new(
+        id: crate::PlayerId,
         device: HwDevice,
         audio_out: AudioOptionsView,
         error_callback: ErrorCallback,
-    ) -> Self {
-        Self {
-            device,
-            audio_out,
-            error_callback,
-            playback: Arc::new(ArcSwap::from_pointee(Playback::Closed)),
-            thread: None,
+    ) -> Result<Self> {
+        let (sender_open_intent, receiver_open_intent) = bounded::<OpenIntent>(1);
+        let playback = Arc::new(ArcSwap::from_pointee(Playback::Closed));
+
+        let spawned = thread::Builder::new()
+            .name(format!("uuav-player-{id}"))
+            .spawn({
+                let audio_out = audio_out.clone();
+                let playback = playback.clone();
+                let receiver = receiver_open_intent.clone();
+
+                move || {
+                    while let Ok((url, cancel_token)) = receiver.recv() {
+                        playback.store(Arc::new(Playback::Opening));
+
+                        match PlaybackUnit::open(
+                            url,
+                            device.clone(),
+                            audio_out.clone(),
+                            cancel_token.clone(),
+                            error_callback.clone(),
+                        ) {
+                            Ok((unit, pipeline)) => {
+                                let unit = Arc::new(unit);
+                                playback.store(Arc::new(Playback::Active(Arc::clone(&unit))));
+                                if let Err(e) = unit.run_blocking(pipeline) {
+                                    error_callback.report(e.to_string());
+                                    playback.store(Arc::new(Playback::Failed));
+                                } else {
+                                    playback.store(Arc::new(Playback::Closed));
+                                }
+                            }
+                            Err(e) => {
+                                if cancel_token.is_cancelled() {
+                                    playback.store(Arc::new(Playback::Closed));
+                                } else {
+                                    error_callback.report(e.to_string());
+                                    playback.store(Arc::new(Playback::Failed));
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+        match spawned {
+            // Safe to do not join the handle on drop
+            Ok(_handle) => Ok(Self {
+                audio_out,
+                playback,
+                sender_open_intent,
+                receiver_open_intent,
+                last_cancel_token: None,
+            }),
+            Err(e) => Err(anyhow!("failed to spawn playback thread: {e}")),
         }
     }
 
@@ -77,58 +114,31 @@ impl UUAVPlayer {
         self.close_media();
 
         let cancel = CancelToken::new();
-        self.playback.store(Arc::new(Playback::Opening));
+        self.last_cancel_token = Some(cancel.clone());
 
-        let index = PLAYBACK_INDEX.fetch_add(1, Ordering::Relaxed);
-        let spawned = thread::Builder::new()
-            .name(format!("uuav-player-{index}"))
-            .spawn({
-                let cancel: ReadOnlyCancelToken = cancel.clone().into();
-                let playback = Arc::clone(&self.playback);
-                let device = self.device.clone();
-                let audio_out = self.audio_out.clone();
-                let error_callback = self.error_callback;
-                move || {
-                    match PlaybackUnit::open(url, device, audio_out, cancel.clone(), error_callback)
-                    {
-                        Ok((unit, pipeline)) => {
-                            let unit = Arc::new(unit);
-                            playback.store(Arc::new(Playback::Active(Arc::clone(&unit))));
-                            if let Err(e) = unit.run_blocking(pipeline) {
-                                report(error_callback, &e.to_string());
-                                playback.store(Arc::new(Playback::Failed));
-                            }
-                        }
-                        Err(e) => {
-                            // a cancelled open is a close, not a failure
-                            if !cancel.is_cancelled() {
-                                report(error_callback, &e.to_string());
-                                playback.store(Arc::new(Playback::Failed));
-                            }
-                        }
-                    }
+        let mut payload: OpenIntent = (url, cancel.into());
+
+        // Send, discard the oldest one if exists
+        loop {
+            match self.sender_open_intent.try_send(payload) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Full(recovery)) => {
+                    payload = recovery;
+                    let _ = self.receiver_open_intent.try_recv();
                 }
-            });
-
-        match spawned {
-            Ok(handle) => {
-                self.thread = Some(PlaybackThread { cancel, handle });
-                Ok(())
-            }
-            Err(e) => {
-                self.playback.store(Arc::new(Playback::Closed));
-                Err(anyhow!("failed to spawn playback thread: {e}"))
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err(anyhow!(
+                        "Instance is disposed, should never happen but no hard fall with unreachable"
+                    ));
+                }
             }
         }
     }
 
-    /// Never fails: stopping the playback thread releases every
-    /// per-playback resource.
     pub(crate) fn close_media(&mut self) {
-        if let Some(thread) = self.thread.take() {
-            thread.stop();
+        if let Some(cancel_token) = self.last_cancel_token.take() {
+            cancel_token.cancel();
         }
-        self.playback.store(Arc::new(Playback::Closed));
     }
 
     fn unit(&self) -> Option<Arc<PlaybackUnit>> {
