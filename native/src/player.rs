@@ -138,6 +138,13 @@ impl UUAVPlayer {
     pub(crate) fn close_media(&mut self) {
         if let Some(cancel_token) = self.last_cancel_token.take() {
             cancel_token.cancel();
+            self.playback.rcu(|cur| {
+                if matches!(cur.as_ref(), Playback::Failed) {
+                    Arc::new(Playback::Closed)
+                } else {
+                    cur.clone()
+                }
+            });
         }
     }
 
