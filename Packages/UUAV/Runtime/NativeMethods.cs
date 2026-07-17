@@ -94,7 +94,7 @@ namespace UUAV
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern ResultFFI uuav_init(
-            IntPtr hwDevice,
+            IntPtr probe_texture,
             AudioOptions audioOptions,
             ErrorCallback? errorCallback
         );

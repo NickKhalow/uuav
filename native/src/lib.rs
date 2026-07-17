@@ -55,6 +55,9 @@ use std::{
     sync::{Arc, Weak, atomic::AtomicU64},
 };
 
+const ERR_NO_RUNTIME: &str = "Runtime is not found";
+const ERR_NO_PLAYER: &str = "player with specific id not found";
+
 static INIT_STATE: ArcSwapOption<Runtime> = ArcSwapOption::const_empty();
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -199,14 +202,6 @@ pub struct NewPlayerResult {
     pub error_message: *const c_char,
 }
 
-#[repr(C)]
-pub struct ConsumeFrameResult {
-    pub ptr: *const f32,
-    pub len: i32,
-    pub capacity: i32,
-    pub error_message: *const c_char,
-}
-
 impl NewPlayerResult {
     const fn ok(player_id: PlayerId) -> Self {
         Self {
@@ -251,12 +246,15 @@ impl<T> From<anyhow::Result<T>> for ResultFFI {
     }
 }
 
+impl From<anyhow::Error> for ResultFFI {
+    fn from(err: anyhow::Error) -> Self {
+        Self::error(err.to_string().as_str())
+    }
+}
+
 fn string_to_c_bytes(s: impl AsRef<str>) -> *const c_char {
     CString::new(s.as_ref()).unwrap_or_default().into_raw()
 }
-
-const ERR_NO_RUNTIME: &str = "Runtime is not found";
-const ERR_NO_PLAYER: &str = "player with specific id not found";
 
 impl Runtime {
     /// Shared-access guard over a registered player; the player stays
@@ -293,11 +291,9 @@ pub const extern "C" fn uuav_abi_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), '\0').as_ptr().cast()
 }
 
-/// # Safety
-/// `hw_device` must be null (rejected) or a live `ID3D11Device*`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uuav_init(
-    hw_device: *const c_void,
+    texture: *const c_void,
     audio_options: AudioOptionsRaw,
     error_callback: Option<RawErrorCallback>,
 ) -> ResultFFI {
@@ -309,18 +305,18 @@ pub unsafe extern "C" fn uuav_init(
         return ResultFFI::error("Error callback is null");
     };
 
-    if hw_device.is_null() {
-        return ResultFFI::error("HwDevice is null");
+    if texture.is_null() {
+        return ResultFFI::error("Texture to capture the HwDevice from is not provided");
     }
+
+    let device = match unsafe { hw_device::HwDevice::from_texture(texture) } {
+        Ok(hw_device) => hw_device,
+        Err(e) => return e.into(),
+    };
 
     let audio_options = match AudioOptions::try_from(audio_options) {
         Ok(options) => options,
-        Err(e) => return ResultFFI::error(&e.to_string()),
-    };
-
-    let device = match unsafe { HwDevice::from_raw(hw_device) } {
-        Ok(device) => device,
-        Err(e) => return ResultFFI::error(&e.to_string()),
+        Err(e) => return e.into(),
     };
 
     let new_runtime = Runtime {

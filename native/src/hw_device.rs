@@ -1,6 +1,10 @@
-use anyhow::{Result, anyhow};
-use ffmpeg_sys_next as ff;
+use anyhow::{Context as _, Result, ensure};
 use std::os::raw::c_void;
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::core::IUnknown;
+
+use anyhow::anyhow;
+use ffmpeg_sys_next as ff;
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::core::Interface;
 
@@ -19,18 +23,29 @@ unsafe impl Send for HwDevice {}
 unsafe impl Sync for HwDevice {}
 
 impl HwDevice {
-    /// # Safety
-    /// `raw_device` must be null (rejected) or a live `ID3D11Device*`.
-    pub(crate) unsafe fn from_raw(raw_device: *const c_void) -> Result<Self> {
-        let raw = raw_device.cast_mut();
-        let device = unsafe { ID3D11Device::from_raw_borrowed(&raw) }
-            .ok_or_else(|| anyhow!("hw_device is not a valid ID3D11Device"))?
-            .clone();
-        Ok(Self { device })
-    }
-
     pub(crate) const fn device(&self) -> &ID3D11Device {
         &self.device
+    }
+
+    /// Derives the engine device from a live `ID3D11Texture2D*` and captures it.
+    ///
+    /// # Safety
+    /// `texture` must be null (rejected) or a live COM pointer.
+    pub(crate) unsafe fn from_texture(texture: *const c_void) -> Result<Self> {
+        ensure!(!texture.is_null(), "texture is null");
+
+        let raw = texture.cast_mut();
+        let unknown =
+            unsafe { IUnknown::from_raw_borrowed(&raw) }.context("texture is not a COM pointer")?;
+
+        // QueryInterface fails cleanly on a non-D3D11 resource (e.g. D3D12)
+        let texture: ID3D11Texture2D = unknown
+            .cast()
+            .context("texture is not an ID3D11Texture2D (is the engine running D3D11?)")?;
+
+        let device = unsafe { texture.GetDevice() }.context("texture has no device")?;
+
+        Ok(Self { device })
     }
 }
 
