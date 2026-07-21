@@ -219,7 +219,8 @@ namespace UUAV
         public static extern ResultFFI uuav_init(
             IntPtr probe_texture,
             AudioOptions audioOptions,
-            ErrorCallback? errorCallback
+            ErrorCallback? errorCallback,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string protocolWhitelist
         );
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

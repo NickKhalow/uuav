@@ -10,6 +10,10 @@ namespace UUAV
     /// </summary>
     internal static class UUAVRuntime
     {
+        // FFmpeg protocol_whitelist for production with untrusted sources.
+        // Media URLs come from untrusted scenes, so this omits file: and the nested-protocol pivots (concat, subfile, ...); 
+        private const string UNTRUSTED_STREAMING_PROTOCOLS = "https,http,tls,tcp,crypto,data,udp,rtp,rtcp,rtsp";
+
         // TODO make sure to don't overabuse the calls from native parts using too many threads (we had a similar issue before)
         // rooted for the process lifetime: the native side keeps this fn pointer
         private static readonly ErrorCallback errorCallback = OnNativeError;
@@ -45,8 +49,15 @@ namespace UUAV
             var config = AudioSettings.GetConfiguration();
             var audioOptions = AudioOptions.FromConfig(config);
 
+            var protocols = UNTRUSTED_STREAMING_PROTOCOLS;
+#if UNITY_EDITOR
+            // Local file playback is a convenience for editing/authoring only;
+            // it stays out of player builds where URLs are untrusted.
+            protocols += ",file";
+#endif
+
             using var probe = ProbeTexture.New();
-            var result = NativeMethods.uuav_init(probe.NativePtr(), audioOptions, errorCallback);
+            var result = NativeMethods.uuav_init(probe.NativePtr(), audioOptions, errorCallback, protocols);
 
             if (result.IsOk == false)
             {
