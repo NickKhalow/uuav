@@ -197,6 +197,54 @@ pub struct VideoSize {
     pub height: u32,
 }
 
+/// Snapshot of the open media's source stream parameters.
+///
+/// Name fields are NUL-terminated UTF-8; =
+/// unknown values are 0 / empty, `duration` is -1.0 for realtime streams.
+/// Video fields are zero when `has_video` is 0,
+/// audio fields when `has_audio` is 0.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MediaInfo {
+    pub duration: f64,
+    pub framerate: f64,
+    pub video_bitrate: i64,
+    pub audio_bitrate: i64,
+    pub width: u32,
+    pub height: u32,
+    pub sample_rate: i32,
+    pub channels: i32,
+    pub video_codec: [c_char; MEDIA_INFO_NAME_LEN],
+    pub pixel_format: [c_char; MEDIA_INFO_NAME_LEN],
+    pub audio_codec: [c_char; MEDIA_INFO_NAME_LEN],
+    pub sample_format: [c_char; MEDIA_INFO_NAME_LEN],
+    pub has_video: u8,
+    pub has_audio: u8,
+}
+
+pub const MEDIA_INFO_NAME_LEN: usize = 32;
+
+impl MediaInfo {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            duration: -1.0,
+            framerate: 0.0,
+            video_bitrate: 0,
+            audio_bitrate: 0,
+            width: 0,
+            height: 0,
+            sample_rate: 0,
+            channels: 0,
+            video_codec: [0; MEDIA_INFO_NAME_LEN],
+            pixel_format: [0; MEDIA_INFO_NAME_LEN],
+            audio_codec: [0; MEDIA_INFO_NAME_LEN],
+            sample_format: [0; MEDIA_INFO_NAME_LEN],
+            has_video: 0,
+            has_audio: 0,
+        }
+    }
+}
+
 #[repr(C)]
 pub struct NewPlayerResult {
     pub player_id: PlayerId,
@@ -359,10 +407,9 @@ pub extern "C" fn uuav_status() -> Status {
         let audio_options = (**s.audio_options.load()).into();
         let players_count = s.registry.len() as u64;
 
-        let device_remove_reason = match unsafe {s.device.device().GetDeviceRemovedReason()}
-        {
+        let device_remove_reason = match unsafe { s.device.device().GetDeviceRemovedReason() } {
             Ok(()) => ptr::null(),
-            Err(e) => string_to_c_bytes(e.to_string())
+            Err(e) => string_to_c_bytes(e.to_string()),
         };
 
         Status {
@@ -480,7 +527,7 @@ pub extern "C" fn uuav_player_state(player_id: PlayerId) -> UUAVState {
         .map_or(UUAVState::UUAV_UNKNOWN, |player| player.state())
 }
 
-// valid from READY; may be unavailable for realtime streams
+// may be unavailable for realtime streams
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uuav_player_duration(
     player_id: PlayerId,
@@ -547,7 +594,6 @@ fn uuav_player_assign_master_clock_internal(
         .assign_master_clock(current_time)
 }
 
-// valid from READY
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uuav_player_get_video_size(
     player_id: PlayerId,
@@ -568,6 +614,29 @@ unsafe fn uuav_player_get_video_size_internal(
         .video_size()
         .context("video size is not available yet")?;
     unsafe { out_size.write(size) };
+    Ok(())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn uuav_player_get_media_info(
+    player_id: PlayerId,
+    out_info: *mut MediaInfo,
+) -> ResultFFI {
+    unsafe { uuav_player_get_media_info_internal(player_id, out_info) }.into()
+}
+
+unsafe fn uuav_player_get_media_info_internal(
+    player_id: PlayerId,
+    out_info: *mut MediaInfo,
+) -> anyhow::Result<()> {
+    ensure!(!out_info.is_null(), "out pointer is null");
+    let state = INIT_STATE.load();
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    let info = runtime
+        .player_by_id(player_id)?
+        .media_info()
+        .context("media info is not available yet")?;
+    unsafe { out_info.write(info) };
     Ok(())
 }
 

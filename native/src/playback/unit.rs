@@ -10,10 +10,12 @@ use super::input::Input;
 use super::transport::{AtomicTransport, PlaybackState};
 use super::util::{AtomicSeekSlot, PLAYBACK_POLL, ReadOnlyCancelToken};
 use super::video_playback::{VideoPlayback, VideoQueue, VideoReader};
-use crate::ffutil::{OwnedPacket, av_err, check};
+use crate::ffutil::{OwnedPacket, Stream, av_err, check, copy_c_name, q2d};
 use crate::hw_device::{HwDevice, HwDeviceContext};
 use crate::video_output::VideoOutput;
-use crate::{AudioOptionsView, ErrorCallback, UUAVState, VideoSize};
+use crate::{AudioOptionsView, ErrorCallback, MediaInfo, UUAVState, VideoSize};
+use std::mem;
+use std::os::raw::c_int;
 
 static NETWORK_INIT: Once = Once::new();
 
@@ -55,11 +57,54 @@ pub(crate) struct PlaybackUnit {
     /// Total duration in seconds, `None` for realtime streams.
     duration: Option<f64>,
     video_size: Option<VideoSize>,
+    /// Source stream parameters, captured while probing in [`Self::open`].
+    media_info: MediaInfo,
     /// Presentation target; created lazily on the render thread.
     output: Mutex<Option<VideoOutput>>,
     /// Engine device the presentation output is created on.
     device: HwDevice,
     error_callback: ErrorCallback,
+}
+
+/// Fills the video half of `info` from the probed stream's parameters.
+fn probe_video_info(info: &mut MediaInfo, stream: Stream) {
+    let par = stream.codecpar();
+    info.has_video = 1;
+    copy_c_name(&mut info.video_codec, unsafe {
+        ff::avcodec_get_name(stream.codec_id())
+    });
+    // SAFETY: the value was probed by FFmpeg itself, so it is a valid
+    // AVPixelFormat (or -1 = NONE, for which the name lookup returns null)
+    let pix_fmt = unsafe { mem::transmute::<c_int, ff::AVPixelFormat>((*par).format) };
+    copy_c_name(&mut info.pixel_format, unsafe {
+        ff::av_get_pix_fmt_name(pix_fmt)
+    });
+    unsafe {
+        info.width = u32::try_from((*par).width).unwrap_or(0);
+        info.height = u32::try_from((*par).height).unwrap_or(0);
+        info.video_bitrate = (*par).bit_rate.max(0);
+    }
+    info.framerate = q2d(stream.avg_frame_rate());
+}
+
+/// Fills the audio half of `info` from the probed stream's parameters.
+fn probe_audio_info(info: &mut MediaInfo, stream: Stream) {
+    let par = stream.codecpar();
+    info.has_audio = 1;
+    copy_c_name(&mut info.audio_codec, unsafe {
+        ff::avcodec_get_name(stream.codec_id())
+    });
+    // SAFETY: the value was probed by FFmpeg itself, so it is a valid
+    // AVSampleFormat (or -1 = NONE, for which the name lookup returns null)
+    let sample_fmt = unsafe { mem::transmute::<c_int, ff::AVSampleFormat>((*par).format) };
+    copy_c_name(&mut info.sample_format, unsafe {
+        ff::av_get_sample_fmt_name(sample_fmt)
+    });
+    unsafe {
+        info.sample_rate = (*par).sample_rate.max(0);
+        info.channels = (*par).ch_layout.nb_channels.max(0);
+        info.audio_bitrate = (*par).bit_rate.max(0);
+    }
 }
 
 impl PlaybackUnit {
@@ -83,6 +128,20 @@ impl PlaybackUnit {
         if video_index < 0 && audio_index < 0 {
             return Err(anyhow!("media has no playable video or audio stream"));
         }
+
+        let media_info = {
+            let mut media_info = MediaInfo::empty();
+            if let Some(d) = input.duration() {
+                media_info.duration = d;
+            }
+            if video_index >= 0 {
+                probe_video_info(&mut media_info, input.stream_at(video_index));
+            }
+            if audio_index >= 0 {
+                probe_audio_info(&mut media_info, input.stream_at(audio_index));
+            }
+            media_info
+        };
 
         let audio_reader = AudioReader::new(audio_out.clone());
         let (video_queue, video_reader) = VideoQueue::channel();
@@ -117,6 +176,7 @@ impl PlaybackUnit {
         let unit = Self {
             duration: input.duration(),
             video_size,
+            media_info,
             cancel,
             seek: AtomicSeekSlot::new(),
             transport: AtomicTransport::new(),
@@ -297,6 +357,10 @@ impl PlaybackUnit {
 
     pub(crate) fn video_size(&self) -> Option<VideoSize> {
         self.video_size.clone()
+    }
+
+    pub(crate) const fn media_info(&self) -> MediaInfo {
+        self.media_info
     }
 
     pub(crate) fn video_texture(&self) -> Option<*const c_void> {

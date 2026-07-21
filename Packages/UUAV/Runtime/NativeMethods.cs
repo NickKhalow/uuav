@@ -77,6 +77,83 @@ namespace UUAV
         public uint Height;
     }
 
+    // Snapshot of the open media's source stream parameters, captured at
+    // open time. Name fields are NUL-terminated UTF-8; unknown values are
+    // 0 / empty, Duration is -1 for realtime streams. Video fields are
+    // zero when HasVideo is false, audio fields when HasAudio is false.
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct MediaInfo
+    {
+        private const int NameLen = 32;
+
+        public double Duration;
+        public double Framerate;
+        public long VideoBitrate;
+        public long AudioBitrate;
+        public uint Width;
+        public uint Height;
+        public int SampleRate;
+        public int Channels;
+        private fixed byte videoCodec[NameLen];
+        private fixed byte pixelFormat[NameLen];
+        private fixed byte audioCodec[NameLen];
+        private fixed byte sampleFormat[NameLen];
+        private readonly byte hasVideo;
+        private readonly byte hasAudio;
+
+        public bool HasVideo => hasVideo != 0;
+
+        public bool HasAudio => hasAudio != 0;
+
+        // e.g. "h264"
+        public string VideoCodec
+        {
+            get
+            {
+                fixed (byte* p = videoCodec)
+                {
+                    return Utf8.FixedToString(p, NameLen);
+                }
+            }
+        }
+
+        // e.g. "yuv420p"
+        public string PixelFormat
+        {
+            get
+            {
+                fixed (byte* p = pixelFormat)
+                {
+                    return Utf8.FixedToString(p, NameLen);
+                }
+            }
+        }
+
+        // e.g. "aac"
+        public string AudioCodec
+        {
+            get
+            {
+                fixed (byte* p = audioCodec)
+                {
+                    return Utf8.FixedToString(p, NameLen);
+                }
+            }
+        }
+
+        // e.g. "fltp"
+        public string SampleFormat
+        {
+            get
+            {
+                fixed (byte* p = sampleFormat)
+                {
+                    return Utf8.FixedToString(p, NameLen);
+                }
+            }
+        }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct Status
     {
@@ -208,11 +285,16 @@ namespace UUAV
             double currentTime
         );
 
-        // valid from READY
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern ResultFFI uuav_player_get_video_size(
             ulong playerId,
             out VideoSize size
+        );
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ResultFFI uuav_player_get_media_info(
+            ulong playerId,
+            out MediaInfo info
         );
 
         // ---- transport (commands: set flags, decoder thread obeys) ------
@@ -267,6 +349,18 @@ namespace UUAV
             return Encoding.UTF8.GetString(bytes, length);
         }
 
+        // reads a NUL-terminated UTF-8 string from a fixed-size buffer
+        public static unsafe string FixedToString(byte* buffer, int capacity)
+        {
+            var length = 0;
+            while (length < capacity && buffer[length] != 0)
+            {
+                length++;
+            }
+
+            return Encoding.UTF8.GetString(buffer, length);
+        }
+
         public static IntPtr AllocCString(string value)
         {
             var bytes = Encoding.UTF8.GetBytes(value);
@@ -278,6 +372,11 @@ namespace UUAV
 
         public static string? ConsumeCString(ref IntPtr ptr)
         {
+            if (ptr == IntPtr.Zero)
+            {
+                return null;
+            }
+            
             var message = Utf8.PtrToString(ptr);
             NativeMethods.uuav_string_free(ptr);
             ptr = IntPtr.Zero;

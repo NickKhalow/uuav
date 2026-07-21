@@ -7,7 +7,59 @@ namespace UUAV
     public sealed class UUAVPlayer : MonoBehaviour
     {
         private delegate ResultFFI TimeQuery(ulong playerId, out double value);
-        
+
+        /// <summary>
+        /// M stands for "Managed" mirrors the original MediaInfo and makes it serializable
+        /// </summary>
+        [Serializable]
+        public struct MediaInfo_M
+        {
+            public double Duration;
+            public double Framerate;
+            public long VideoBitrate;
+            public long AudioBitrate;
+            public uint Width;
+            public uint Height;
+            public int SampleRate;
+            public int Channels;
+            public bool HasVideo;
+
+            public bool HasAudio;
+
+            // e.g. "h264"
+            public string VideoCodec;
+
+            // e.g. "yuv420p"
+            public string PixelFormat;
+
+            // e.g. "aac"
+            public string AudioCodec;
+
+            // e.g. "fltp"
+            public string SampleFormat;
+
+            public static MediaInfo_M From(MediaInfo mediaInfo)
+            {
+                return new MediaInfo_M
+                {
+                    Duration = mediaInfo.Duration,
+                    Framerate = mediaInfo.Framerate,
+                    VideoBitrate = mediaInfo.VideoBitrate,
+                    AudioBitrate = mediaInfo.AudioBitrate,
+                    Width = mediaInfo.Width,
+                    Height = mediaInfo.Height,
+                    SampleRate = mediaInfo.SampleRate,
+                    Channels = mediaInfo.Channels,
+                    HasVideo = mediaInfo.HasVideo,
+                    HasAudio = mediaInfo.HasAudio,
+                    VideoCodec = mediaInfo.VideoCodec,
+                    PixelFormat = mediaInfo.PixelFormat,
+                    AudioCodec = mediaInfo.AudioCodec,
+                    SampleFormat = mediaInfo.SampleFormat
+                };
+            }
+        }
+
         private static readonly int YTexId = Shader.PropertyToID("_YTex");
         private static readonly int UVTexId = Shader.PropertyToID("_UVTex");
 
@@ -17,19 +69,21 @@ namespace UUAV
         // optional user-provided surface; auto-allocated at video size when null
         [SerializeField] private RenderTexture? targetTexture;
 
-        [Header("Debug View")] 
+        [Header("Debug View")]
         // immutable after Awake; 0 means creation failed and the component is inert
-        [SerializeField] private ulong playerId;
+        [SerializeField]
+        private ulong playerId;
+
         [SerializeField] private int nativeChannels;
         [SerializeField] private VideoSize videoSize;
-        
+
         [SerializeField] private bool enableDebugGather;
         [SerializeField] private double currentTimeDebug;
         [SerializeField] private double durationDebug;
         [SerializeField] private string? nativeState;
+        [SerializeField] private MediaInfo_M mediaInfo;
 
-        [Header("Resources")] 
-        [SerializeField] private Material? nv12Material;
+        [Header("Resources")] [SerializeField] private Material? nv12Material;
         [SerializeField] private AudioSource audioSource = null!;
         [SerializeField] private Texture2D? yPlane;
         [SerializeField] private Texture2D? uvPlane;
@@ -88,6 +142,24 @@ namespace UUAV
         public void Seek(double time)
         {
             Check(NativeMethods.uuav_player_seek_async(playerId, time), "seek");
+        }
+
+        public bool TryGetMediaInfo(out MediaInfo info)
+        {
+            info = default;
+            if (playerId == 0)
+            {
+                return false;
+            }
+
+            if (State is UUAVState.Closed or UUAVState.Error)
+            {
+                return false;
+            }
+
+            var result = NativeMethods.uuav_player_get_media_info(playerId, out info);
+            Check(result, "uuav_player_get_media_info");
+            return result.IsOk;
         }
 
         // TODO if long-session drift corrections become audible, derive media
@@ -155,7 +227,13 @@ namespace UUAV
                 durationDebug = Duration;
                 currentTimeDebug = CurrentTime;
                 nativeState = NativeMethods.uuav_player_state(playerId).ToStringNoAlloc();
+
+                if (TryGetMediaInfo(out MediaInfo m))
+                {
+                    mediaInfo = MediaInfo_M.From(m);
+                }
             }
+
             switch (NativeMethods.uuav_player_state(playerId))
             {
                 case UUAVState.Ready:
@@ -211,7 +289,8 @@ namespace UUAV
             }
         }
 
-#region AI generated
+        #region AI generated
+
         // TODO AI generated, recheck carefully
         // audio mixer thread. playerId is immutable, safe to read directly;
         // a stale id after uuav_player_free is a native no-op returning 0
@@ -377,7 +456,6 @@ namespace UUAV
             plane.wrapMode = TextureWrapMode.Clamp;
         }
 
-#endregion
-
+        #endregion
     }
 }

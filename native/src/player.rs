@@ -8,7 +8,7 @@ use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
 use crate::hw_device::HwDevice;
 use crate::playback::{CancelToken, PlaybackUnit, ReadOnlyCancelToken, fill_silence};
-use crate::{AudioOptionsView, ErrorCallback, UUAVState, VideoSize};
+use crate::{AudioOptionsView, ErrorCallback, MediaInfo, UUAVState, VideoSize};
 
 /// Lifecycle of the player's playback, shared with the playback thread.
 enum Playback {
@@ -111,7 +111,7 @@ impl UUAVPlayer {
     // not blocking
     // async, returns immediately
     pub(crate) fn open_media_intent(&mut self, url: String) -> Result<()> {
-        const ATTEMPTS : u32 = 100;
+        const ATTEMPTS: u32 = 100;
 
         self.close_media();
 
@@ -205,6 +205,10 @@ impl UUAVPlayer {
 
     pub(crate) fn video_size(&self) -> Option<VideoSize> {
         self.unit()?.video_size()
+    }
+
+    pub(crate) fn media_info(&self) -> Option<MediaInfo> {
+        Some(self.unit()?.media_info())
     }
 
     // NV12 texture on the engine's device; the engine creates its own plane

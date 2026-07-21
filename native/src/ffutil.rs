@@ -50,6 +50,27 @@ pub(crate) const fn q2d(r: ff::AVRational) -> f64 {
     }
 }
 
+/// Copies a NUL-terminated C string into a fixed name buffer, truncating
+/// to leave room for the terminator; a null `src` yields an empty string.
+pub(crate) fn copy_c_name<const N: usize>(dst: &mut [c_char; N], src: *const c_char) {
+    let bytes: &[u8] = if src.is_null() {
+        &[]
+    } else {
+        unsafe { CStr::from_ptr(src) }.to_bytes()
+    };
+
+    let len = bytes.len().min(N.saturating_sub(1));
+    for (d, &s) in dst.iter_mut().zip(bytes.iter().take(len)) {
+        *d = c_char::from_ne_bytes([s]);
+    }
+
+    // terminate right after the copied bytes: dst may hold a longer
+    // previous name, and position `len` always exists for N > 0
+    if let Some(terminator) = dst.get_mut(len) {
+        *terminator = 0;
+    }
+}
+
 /// Non-owning view of an `AVStream` belonging to a live format context.
 #[derive(Clone, Copy)]
 pub(crate) struct Stream(*mut ff::AVStream);
@@ -72,6 +93,10 @@ impl Stream {
 
     pub(crate) fn time_base(self) -> ff::AVRational {
         unsafe { (*self.0).time_base }
+    }
+
+    pub(crate) fn avg_frame_rate(self) -> ff::AVRational {
+        unsafe { (*self.0).avg_frame_rate }
     }
 
     pub(crate) fn find_decoder(self) -> Result<*const ff::AVCodec> {
