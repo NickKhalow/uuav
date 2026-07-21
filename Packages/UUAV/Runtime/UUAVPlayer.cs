@@ -14,23 +14,29 @@ namespace UUAV
         [SerializeField] private string url = "";
         [SerializeField] private bool playOnStart;
 
+        // optional user-provided surface; auto-allocated at video size when null
+        [SerializeField] private RenderTexture? targetTexture;
+
         [Header("Debug View")] 
         // immutable after Awake; 0 means creation failed and the component is inert
         [SerializeField] private ulong playerId;
         [SerializeField] private int nativeChannels;
+        [SerializeField] private VideoSize videoSize;
         
         [SerializeField] private bool enableDebugGather;
         [SerializeField] private double currentTimeDebug;
         [SerializeField] private double durationDebug;
         [SerializeField] private string? nativeState;
 
-        private AudioSource audioSource = null!;
-        private Material? nv12Material;
-        private Texture2D? yPlane;
-        private Texture2D? uvPlane;
-        private RenderTexture? runtimeSurface;
-        private IntPtr nativeTexture;
-        private VideoSize videoSize;
+        [Header("Resources")] 
+        [SerializeField] private Material? nv12Material;
+        [SerializeField] private AudioSource audioSource = null!;
+        [SerializeField] private Texture2D? yPlane;
+        [SerializeField] private Texture2D? uvPlane;
+        [SerializeField] private RenderTexture? runtimeSurface;
+        [SerializeField] private IntPtr nativeTexture;
+
+        private static ulong playerIncrementalID;
 
         public string CurrentUrl => url;
 
@@ -94,6 +100,14 @@ namespace UUAV
             );
         }
 
+        public static UUAVPlayer New()
+        {
+            ulong currentID = ++playerIncrementalID;
+            GameObject gm = new GameObject($"UUAVPlayer_Instance_{currentID}");
+            UUAVPlayer instance = gm.AddComponent<UUAVPlayer>();
+            return instance;
+        }
+
         private void Awake()
         {
             audioSource = GetComponent<AudioSource>();
@@ -142,14 +156,6 @@ namespace UUAV
                 currentTimeDebug = CurrentTime;
                 nativeState = NativeMethods.uuav_player_state(playerId).ToStringNoAlloc();
             }
-            
-            
-            return;
-            
-            
-            // TODO the issue with the loop, unity dies when the Update loop activates
-            // Without the loop player normally switches state (Closed -> Ready -> Playing)
-
             switch (NativeMethods.uuav_player_state(playerId))
             {
                 case UUAVState.Ready:
@@ -160,8 +166,6 @@ namespace UUAV
                 default:
                     return;
             }
-
-            return;
 
             // presents the due frame into the native NV12 texture on the render
             // thread; the blit below is enqueued after it in submission order,
