@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use ffmpeg_sys_next as ff;
+use std::ffi::CStr;
 use std::os::raw::{c_int, c_void};
 use std::ptr;
 
@@ -64,6 +65,7 @@ impl VideoDecoder {
 
     pub(crate) fn new(stream: Stream, hw: &HwDeviceContext) -> Result<Self> {
         let codec = stream.find_decoder().context("video stream")?;
+        ensure_d3d11_support(codec)?;
         let mut ctx = OwnedDecoder::new(codec)?;
 
         unsafe {
@@ -148,6 +150,35 @@ impl VideoDecoder {
     pub(crate) fn flush(&mut self) {
         unsafe { ff::avcodec_flush_buffers(self.ctx.as_mut_ptr()) };
     }
+}
+
+/// Rejects codecs without a D3D11VA hardware path
+/// Software-only decoders never invoke `get_format`, so without
+/// this probe the rejection would only happen after a software frame was
+/// already decoded.
+/// TODO support software fallback next
+fn ensure_d3d11_support(codec: *const ff::AVCodec) -> Result<()> {
+    for index in 0.. {
+        let config = unsafe { ff::avcodec_get_hw_config(codec, index) };
+        if config.is_null() {
+            break;
+        }
+        let config = unsafe { &*config };
+        let by_device_ctx =
+            config.methods & ff::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as c_int != 0;
+        if by_device_ctx
+            && config.device_type == ff::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA
+            && config.pix_fmt == ff::AVPixelFormat::AV_PIX_FMT_D3D11
+        {
+            return Ok(());
+        }
+    }
+
+    let name = unsafe { CStr::from_ptr(ff::avcodec_get_name((*codec).id)) };
+    Err(anyhow!(
+        "codec {} has no D3D11 hardware decoder; hardware decoding is mandatory",
+        name.to_string_lossy()
+    ))
 }
 
 /// Rejects everything but the D3D11 hardware pixel format: returning NONE
