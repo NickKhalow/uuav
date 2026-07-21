@@ -1,4 +1,4 @@
-# UUAV
+# UUAV (Ultimately United Audio/Video)
 
 A video/audio player for Unity built on a native Rust core and FFmpeg, with D3D11VA hardware-accelerated video decoding.
 
