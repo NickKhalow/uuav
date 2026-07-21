@@ -11,4 +11,4 @@ mkdir -p "$DEST_DIR"
 cp "target/$TARGET/release/uuav.dll" "$DEST_DIR/"
 
 echo "Deployed to: $DEST_DIR"
-echo "Make sure to provied `libwinpthread-1.dll` and ffmpeg binaries mentioned in the readme file"
+echo "Make sure to provied libwinpthread-1.dll and ffmpeg binaries mentioned in the readme file"
