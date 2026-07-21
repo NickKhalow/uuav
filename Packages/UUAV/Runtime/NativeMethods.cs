@@ -70,6 +70,7 @@ namespace UUAV
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    [Serializable]
     public struct VideoSize
     {
         public uint Width;
