@@ -108,8 +108,6 @@ impl Drop for Input {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-
     use super::*;
     use crate::playback::util::CancelToken;
 
@@ -121,33 +119,35 @@ mod tests {
     // point is only whether FFmpeg is *allowed* to reach the filesystem.
     const FILE_URL: &str = "file:///nonexistent/uuav-protocol-whitelist-test.mp4";
 
-    // `Input` is not `Debug`, so unwrap the error by hand.
-    fn open_error(whitelist: &str) -> String {
-        let whitelist = CString::new(whitelist).unwrap();
+    // `Input` is not `Debug`
+    fn open_error(whitelist: &str) -> Result<String> {
+        let whitelist = CString::new(whitelist)?;
         // SAFETY: `whitelist` is a valid NUL-terminated C string.
         let protocol = unsafe { StreamingProtocol::new(whitelist.as_ptr()) }.unwrap();
         match Input::open(cancel(), FILE_URL, &protocol) {
             Ok(_) => panic!("opening a nonexistent file must fail"),
-            Err(e) => e.to_string().to_lowercase(),
+            Err(e) => Ok(e.to_string().to_lowercase()),
         }
     }
 
     #[test]
-    fn file_allowed_when_whitelisted_reaches_filesystem() {
+    fn file_allowed_when_whitelisted_reaches_filesystem() -> Result<()> {
         // Protocol allowed → the failure is the missing file, meaning FFmpeg
         // got past the whitelist gate and hit the filesystem.
-        let msg = open_error("file");
+        let msg = open_error("file")?;
         assert!(msg.contains("no such file"), "expected a filesystem error, got: {msg}");
+        Ok(())
     }
 
     #[test]
-    fn file_denied_before_touching_filesystem() {
+    fn file_denied_before_touching_filesystem() -> Result<()> {
         // Blocked at the gate → FFmpeg never reached the filesystem, so this
         // is NOT a "no such file" error.
-        let msg = open_error("https,tls,tcp");
+        let msg = open_error("https,tls,tcp")?;
         assert!(
             !msg.contains("no such file"),
             "file: must be blocked before the filesystem, got: {msg}"
         );
+        Ok(())
     }
 }
