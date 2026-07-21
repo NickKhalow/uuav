@@ -42,6 +42,7 @@ mod video_output;
 use anyhow::{Context as _, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use dashmap::DashMap;
+use ffutil::StreamingProtocol;
 use hw_device::HwDevice;
 use player::UUAVPlayer;
 use std::{
@@ -63,6 +64,7 @@ struct Runtime {
     device: HwDevice,
     error_callback: Arc<RawErrorCallback>,
     audio_options: Arc<ArcSwap<AudioOptions>>,
+    protocol_whitelist: Arc<StreamingProtocol>,
     registry: DashMap<PlayerId, UUAVPlayer>,
 }
 
@@ -338,11 +340,18 @@ pub const extern "C" fn uuav_abi_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), '\0').as_ptr().cast()
 }
 
+/// Initializes the global runtime.
+///
+/// `protocol_whitelist` is a NUL-terminated, comma-separated FFmpeg protocol
+/// list; init fails if it is null or empty. Recommended baseline is
+/// `https,http,tls,tcp,crypto,data,udp,rtp,rtcp,rtsp`, adding `file` only for
+/// editor/local playback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uuav_init(
     texture: *const c_void,
     audio_options: AudioOptionsRaw,
     error_callback: Option<RawErrorCallback>,
+    protocol_whitelist: *const c_char,
 ) -> ResultFFI {
     if INIT_STATE.load().is_some() {
         return ResultFFI::error("Already initialized");
@@ -366,10 +375,16 @@ pub unsafe extern "C" fn uuav_init(
         Err(e) => return e.into(),
     };
 
+    let protocol_whitelist = match unsafe { StreamingProtocol::new(protocol_whitelist) } {
+        Ok(protocols) => protocols,
+        Err(e) => return e.into(),
+    };
+
     let new_runtime = Runtime {
         device,
         error_callback: Arc::new(error_callback),
         audio_options: Arc::new(ArcSwap::new(Arc::new(audio_options))),
+        protocol_whitelist: Arc::new(protocol_whitelist),
         registry: DashMap::new(),
     };
 
@@ -434,6 +449,7 @@ pub extern "C" fn uuav_player_new() -> NewPlayerResult {
         s.device.clone(),
         AudioOptionsView(Arc::clone(&s.audio_options)),
         ErrorCallback::from_raw(Arc::downgrade(&s.error_callback)),
+        Arc::clone(&s.protocol_whitelist),
     ) {
         Ok(player) => {
             s.registry.insert(next_id, player);

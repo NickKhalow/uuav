@@ -10,7 +10,7 @@ use super::input::Input;
 use super::transport::{AtomicTransport, PlaybackState};
 use super::util::{AtomicSeekSlot, PLAYBACK_POLL, ReadOnlyCancelToken};
 use super::video_playback::{VideoPlayback, VideoQueue, VideoReader};
-use crate::ffutil::{OwnedPacket, Stream, av_err, check, copy_c_name, q2d};
+use crate::ffutil::{OwnedPacket, Stream, StreamingProtocol, av_err, check, copy_c_name, q2d};
 use crate::hw_device::{HwDevice, HwDeviceContext};
 use crate::video_output::VideoOutput;
 use crate::{AudioOptionsView, ErrorCallback, MediaInfo, UUAVState, VideoSize};
@@ -117,12 +117,13 @@ impl PlaybackUnit {
         audio_out: AudioOptionsView,
         cancel: ReadOnlyCancelToken,
         error_callback: ErrorCallback,
+        protocol_whitelist: &StreamingProtocol,
     ) -> Result<(Self, Pipeline)> {
         NETWORK_INIT.call_once(|| {
             unsafe { ff::avformat_network_init() };
         });
 
-        let input = Input::open(cancel.clone(), &url)?;
+        let input = Input::open(cancel.clone(), &url, protocol_whitelist)?;
         let video_index = input.find_best_stream(ff::AVMediaType::AVMEDIA_TYPE_VIDEO);
         let audio_index = input.find_best_stream(ff::AVMediaType::AVMEDIA_TYPE_AUDIO);
         if video_index < 0 && audio_index < 0 {

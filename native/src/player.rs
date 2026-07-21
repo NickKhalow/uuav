@@ -6,6 +6,7 @@ use std::thread::{self};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
+use crate::ffutil::StreamingProtocol;
 use crate::hw_device::HwDevice;
 use crate::playback::{CancelToken, PlaybackUnit, ReadOnlyCancelToken, fill_silence};
 use crate::{AudioOptionsView, ErrorCallback, MediaInfo, UUAVState, VideoSize};
@@ -50,6 +51,7 @@ impl UUAVPlayer {
         device: HwDevice,
         audio_out: AudioOptionsView,
         error_callback: ErrorCallback,
+        protocol_whitelist: Arc<StreamingProtocol>,
     ) -> Result<Self> {
         let (sender_open_intent, receiver_open_intent) = bounded::<OpenIntent>(1);
         let playback = Arc::new(ArcSwap::from_pointee(Playback::Closed));
@@ -71,6 +73,7 @@ impl UUAVPlayer {
                             audio_out.clone(),
                             cancel_token.clone(),
                             error_callback.clone(),
+                            &protocol_whitelist,
                         ) {
                             Ok((unit, pipeline)) => {
                                 let unit = Arc::new(unit);

@@ -6,7 +6,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::util::ReadOnlyCancelToken;
-use crate::ffutil::{Stream, check};
+use crate::ffutil::{AvDict, Stream, StreamingProtocol, check};
 
 /// Aborts blocking demuxer I/O when the playback is being closed.
 unsafe extern "C" fn interrupt_cb(opaque: *mut c_void) -> c_int {
@@ -27,9 +27,15 @@ pub(super) struct Input {
 
 impl Input {
     /// Opens the media and probes its streams. Demuxer I/O is aborted
-    /// through `cancel` (see [`interrupt_cb`]).
-    pub(super) fn open(cancel_token: ReadOnlyCancelToken, url: &str) -> Result<Self> {
+    /// through `cancel` (see [`interrupt_cb`]); `protocol_whitelist` bounds the
+    /// protocols the demuxer and any nested (HLS segment) contexts may use.
+    pub(super) fn open(
+        cancel_token: ReadOnlyCancelToken,
+        url: &str,
+        protocol_whitelist: &StreamingProtocol,
+    ) -> Result<Self> {
         let url_c = CString::new(url).map_err(|_| anyhow!("url contains a NUL byte"))?;
+        let mut opts = AvDict::from(protocol_whitelist);
 
         let input = unsafe {
             let mut fmt = ff::avformat_alloc_context();
@@ -40,11 +46,13 @@ impl Input {
                 callback: Some(interrupt_cb),
                 opaque: cancel_token.as_flag_ptr().cast_mut().cast::<c_void>(),
             };
+
             // avformat_open_input frees the context on failure
             check(
                 "avformat_open_input",
-                ff::avformat_open_input(&mut fmt, url_c.as_ptr(), ptr::null(), ptr::null_mut()),
+                ff::avformat_open_input(&mut fmt, url_c.as_ptr(), ptr::null(), opts.as_mut_ptr()),
             )?;
+
             Self {
                 fmt,
                 _cancel: cancel_token,
@@ -95,5 +103,51 @@ impl Input {
 impl Drop for Input {
     fn drop(&mut self) {
         unsafe { ff::avformat_close_input(&mut self.fmt) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use crate::playback::util::CancelToken;
+
+    fn cancel() -> ReadOnlyCancelToken {
+        CancelToken::new().into()
+    }
+
+    // A path that does not exist, so `file:` never reads anything real: the
+    // point is only whether FFmpeg is *allowed* to reach the filesystem.
+    const FILE_URL: &str = "file:///nonexistent/uuav-protocol-whitelist-test.mp4";
+
+    // `Input` is not `Debug`, so unwrap the error by hand.
+    fn open_error(whitelist: &str) -> String {
+        let whitelist = CString::new(whitelist).unwrap();
+        // SAFETY: `whitelist` is a valid NUL-terminated C string.
+        let protocol = unsafe { StreamingProtocol::new(whitelist.as_ptr()) }.unwrap();
+        match Input::open(cancel(), FILE_URL, &protocol) {
+            Ok(_) => panic!("opening a nonexistent file must fail"),
+            Err(e) => e.to_string().to_lowercase(),
+        }
+    }
+
+    #[test]
+    fn file_allowed_when_whitelisted_reaches_filesystem() {
+        // Protocol allowed → the failure is the missing file, meaning FFmpeg
+        // got past the whitelist gate and hit the filesystem.
+        let msg = open_error("file");
+        assert!(msg.contains("no such file"), "expected a filesystem error, got: {msg}");
+    }
+
+    #[test]
+    fn file_denied_before_touching_filesystem() {
+        // Blocked at the gate → FFmpeg never reached the filesystem, so this
+        // is NOT a "no such file" error.
+        let msg = open_error("https,tls,tcp");
+        assert!(
+            !msg.contains("no such file"),
+            "file: must be blocked before the filesystem, got: {msg}"
+        );
     }
 }

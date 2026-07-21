@@ -1,8 +1,8 @@
 //! Thin RAII wrappers and error helpers over `ffmpeg-sys-next`.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use ffmpeg_sys_next as ff;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::num::NonZeroI32;
 use std::os::raw::{c_char, c_int};
 
@@ -68,6 +68,49 @@ pub(crate) fn copy_c_name<const N: usize>(dst: &mut [c_char; N], src: *const c_c
     // previous name, and position `len` always exists for N > 0
     if let Some(terminator) = dst.get_mut(len) {
         *terminator = 0;
+    }
+}
+
+pub(crate) struct StreamingProtocol(CString);
+
+impl StreamingProtocol {
+    /// Safety
+    /// `raw` must be null or point to a NUL-terminated C string.
+    pub(crate) unsafe fn new(raw: *const c_char) -> Result<Self> {
+        ensure!(!raw.is_null(), "protocol_whitelist is null");
+        let value = unsafe { CStr::from_ptr(raw) };
+        ensure!(!value.to_bytes().is_empty(), "protocol_whitelist is empty");
+        Ok(Self(value.to_owned()))
+    }
+}
+
+/// Owning wrapper around an `AVDictionary`.
+pub(crate) struct AvDict(*mut ff::AVDictionary);
+
+impl AvDict {
+    #[allow(clippy::needless_pass_by_ref_mut)] // hands out a mutable alias
+    pub(crate) const fn as_mut_ptr(&mut self) -> *mut *mut ff::AVDictionary {
+        &raw mut self.0
+    }
+}
+
+impl From<&StreamingProtocol> for AvDict {
+    fn from(protocol: &StreamingProtocol) -> Self {
+        let mut dict: *mut ff::AVDictionary = std::ptr::null_mut();
+
+        // Only fails on allocation failure, which leaves `dict` null and
+        // surfaces later as an open error.
+        // Copies the protocol value
+        unsafe {
+            ff::av_dict_set(&mut dict, c"protocol_whitelist".as_ptr(), protocol.0.as_ptr(), 0);
+        }
+        Self(dict)
+    }
+}
+
+impl Drop for AvDict {
+    fn drop(&mut self) {
+        unsafe { ff::av_dict_free(&mut self.0) };
     }
 }
 
