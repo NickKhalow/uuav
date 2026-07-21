@@ -1,0 +1,16 @@
+{
+    "name": "UUAV.AVProCompat",
+    "rootNamespace": "RenderHeads.Media.AVProVideo",
+    "references": [
+        "GUID:d9709898aa920584a8d1613950e6a7f5"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
