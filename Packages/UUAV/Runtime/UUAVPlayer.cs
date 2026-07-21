@@ -103,6 +103,8 @@ namespace UUAV
         public RenderTexture? CurrentTexture =>
             targetTexture != null ? targetTexture : runtimeSurface;
 
+        public AudioSource AudioSource => audioSource;
+
         public void OpenMedia(string mediaUrl)
         {
             url = mediaUrl;
