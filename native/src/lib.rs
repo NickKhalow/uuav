@@ -30,8 +30,6 @@
     clippy::missing_safety_doc,
     clippy::doc_markdown
 )]
-// TODO solve later
-#![allow(clippy::significant_drop_tightening)]
 
 mod audio_decoder;
 mod ffutil;
