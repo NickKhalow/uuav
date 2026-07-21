@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result, ensure};
 use std::os::raw::c_void;
-use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Graphics::Direct3D11::{ID3D11Multithread, ID3D11Texture2D};
 use windows::core::IUnknown;
 
 use anyhow::anyhow;
@@ -44,6 +44,20 @@ impl HwDevice {
             .context("texture is not an ID3D11Texture2D (is the engine running D3D11?)")?;
 
         let device = unsafe { texture.GetDevice() }.context("texture has no device")?;
+
+        // itself; enables multithread protection on the external device.
+        // Without it, D3D11VA decode calls on the playback thread race the engine's render
+        // thread on the shared immediate context and hang the runtime.
+        unsafe {
+            let immediate = device
+                .GetImmediateContext()
+                .context("device has no immediate context")?;
+            let multithread: ID3D11Multithread = immediate
+                .cast()
+                .context("immediate context exposes no ID3D11Multithread")?;
+            // the return is the previous protection state, not an error
+            let _ = multithread.SetMultithreadProtected(true);
+        }
 
         Ok(Self { device })
     }
