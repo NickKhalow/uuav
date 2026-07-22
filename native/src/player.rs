@@ -8,7 +8,9 @@ use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
 use crate::ffutil::StreamingProtocol;
 use crate::hw_device::HwDevice;
-use crate::playback::{CancelToken, PlaybackUnit, ReadOnlyCancelToken, fill_silence};
+use crate::playback::{
+    CancelToken, ControlPush, PlaybackUnit, ReadOnlyCancelToken, UnitControls, fill_silence, DEFAULT_PLAYBACK_RATE
+};
 use crate::{AudioOptionsView, ErrorCallback, MediaInfo, UUAVState, VideoSize};
 
 /// Lifecycle of the player's playback, shared with the playback thread.
@@ -34,6 +36,9 @@ type OpenIntent = (Url, ReadOnlyCancelToken);
 pub(crate) struct UUAVPlayer {
     audio_out: AudioOptionsView,
     playback: Arc<ArcSwap<Playback>>,
+    play_control: ControlPush<bool>,
+    looping_control: ControlPush<bool>,
+    rate_control: ControlPush<f64>,
     sender_open_intent: Sender<OpenIntent>,
     receiver_open_intent: Receiver<OpenIntent>,
     last_cancel_token: Option<CancelToken>,
@@ -55,6 +60,9 @@ impl UUAVPlayer {
     ) -> Result<Self> {
         let (sender_open_intent, receiver_open_intent) = bounded::<OpenIntent>(1);
         let playback = Arc::new(ArcSwap::from_pointee(Playback::Closed));
+        let play_control = ControlPush::new(false);
+        let looping_control = ControlPush::new(false);
+        let rate_control = ControlPush::new(DEFAULT_PLAYBACK_RATE);
 
         let spawned = thread::Builder::new()
             .name(format!("uuav-player-{id}"))
@@ -62,6 +70,9 @@ impl UUAVPlayer {
                 let audio_out = audio_out.clone();
                 let playback = playback.clone();
                 let receiver = receiver_open_intent.clone();
+                let play_or_pause = play_control.consumer();
+                let looping = looping_control.consumer();
+                let rate = rate_control.consumer();
 
                 move || {
                     while let Ok((url, cancel_token)) = receiver.recv() {
@@ -74,6 +85,11 @@ impl UUAVPlayer {
                             cancel_token.clone(),
                             error_callback.clone(),
                             &protocol_whitelist,
+                            UnitControls {
+                                play_or_pause: play_or_pause.clone(),
+                                looping: looping.clone(),
+                                rate: rate.clone(),
+                            },
                         ) {
                             Ok((unit, pipeline)) => {
                                 let unit = Arc::new(unit);
@@ -103,6 +119,9 @@ impl UUAVPlayer {
             Ok(_handle) => Ok(Self {
                 audio_out,
                 playback,
+                play_control,
+                looping_control,
+                rate_control,
                 sender_open_intent,
                 receiver_open_intent,
                 last_cancel_token: None,
@@ -143,6 +162,10 @@ impl UUAVPlayer {
     }
 
     pub(crate) fn close_media(&mut self) {
+
+        // Prevent unrequired autoplay on open_media
+        self.play_control.push(false);
+
         if let Some(cancel_token) = self.last_cancel_token.take() {
             cancel_token.cancel();
             self.playback.rcu(|cur| {
@@ -168,13 +191,31 @@ impl UUAVPlayer {
     }
 
     pub(crate) fn play(&self) -> Result<()> {
-        self.active_unit()?.play();
+        self.play_control.push(true);
         Ok(())
     }
 
     pub(crate) fn pause(&self) -> Result<()> {
-        self.active_unit()?.pause();
+        self.play_control.push(false);
         Ok(())
+    }
+
+    pub(crate) fn set_looping(&self, looping: bool) {
+        self.looping_control.push(looping);
+    }
+
+    pub(crate) fn looping(&self) -> bool {
+        self.looping_control.latest()
+    }
+
+    /// Varispeed rate in media seconds per wall second; persists across
+    /// url switches. Realtime streams keep playing at 1x regardless.
+    pub(crate) fn set_rate(&self, rate: f64) {
+        self.rate_control.push(rate);
+    }
+
+    pub(crate) fn rate(&self) -> f64 {
+        self.rate_control.latest()
     }
 
     // not blocking
