@@ -130,9 +130,10 @@ impl VideoPlayback {
         start_offset: f64,
         cancel: &ReadOnlyCancelToken,
         seek: &AtomicSeekSlot,
+        poll_controls: &dyn Fn(),
     ) -> Result<()> {
         self.decoder.send(packet.as_mut_ptr())?;
-        self.pump(start_offset, cancel, seek)
+        self.pump(start_offset, cancel, seek, poll_controls)
     }
 
     /// Sends end-of-stream and moves the remaining frames into the queue.
@@ -141,9 +142,10 @@ impl VideoPlayback {
         start_offset: f64,
         cancel: &ReadOnlyCancelToken,
         seek: &AtomicSeekSlot,
+        poll_controls: &dyn Fn(),
     ) -> Result<()> {
         self.decoder.send(ptr::null())?;
-        self.pump(start_offset, cancel, seek)
+        self.pump(start_offset, cancel, seek, poll_controls)
     }
 
     /// Discards everything belonging to the pre-seek position.
@@ -159,11 +161,14 @@ impl VideoPlayback {
 
     /// Moves every frame the decoder has ready into the presentation queue,
     /// waiting for space while staying responsive to stop/seek commands.
+    /// The wait also keeps `poll_controls` applied: while not playing the
+    /// queue does not drain, so a queued play would otherwise never land.
     fn pump(
         &mut self,
         start_offset: f64,
         cancel: &ReadOnlyCancelToken,
         seek: &AtomicSeekSlot,
+        poll_controls: &dyn Fn(),
     ) -> Result<()> {
         loop {
             match self.decoder.receive()? {
@@ -175,6 +180,9 @@ impl VideoPlayback {
                             // be flushed
                             return Ok(());
                         }
+                        // after the cancel check: a retired unit must not
+                        // consume a command meant for its successor
+                        poll_controls();
                         match self.queue.try_push(frame) {
                             Ok(()) => break,
                             Err(returned) => {

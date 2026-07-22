@@ -121,13 +121,14 @@ impl AudioPlayback {
         start_offset: f64,
         cancel: &ReadOnlyCancelToken,
         seek: &AtomicSeekSlot,
+        poll_controls: &dyn Fn(),
     ) -> Result<()> {
         let options = self.audio_out.current();
         if self.decoder.set_output(options) {
             self.ring.replace(options, self.playback_rate);
         }
         self.decoder.send(packet.as_mut_ptr())?;
-        self.pump(start_offset, cancel, seek)
+        self.pump(start_offset, cancel, seek, poll_controls)
     }
 
     /// Sends end-of-stream and moves the remaining samples into the ring.
@@ -136,9 +137,10 @@ impl AudioPlayback {
         start_offset: f64,
         cancel: &ReadOnlyCancelToken,
         seek: &AtomicSeekSlot,
+        poll_controls: &dyn Fn(),
     ) -> Result<()> {
         self.decoder.send(ptr::null())?;
-        self.pump(start_offset, cancel, seek)
+        self.pump(start_offset, cancel, seek, poll_controls)
     }
 
     /// Discards everything belonging to the pre-seek position.
@@ -155,11 +157,14 @@ impl AudioPlayback {
 
     /// Moves every frame the decoder has ready into the ring, waiting for
     /// room while staying responsive to stop/seek commands.
+    /// The wait also keeps `poll_controls` applied: while not playing the
+    /// ring does not drain, so a queued play would otherwise never land.
     fn pump(
         &mut self,
         start_offset: f64,
         cancel: &ReadOnlyCancelToken,
         seek: &AtomicSeekSlot,
+        poll_controls: &dyn Fn(),
     ) -> Result<()> {
         loop {
             match self.decoder.receive()? {
@@ -171,6 +176,9 @@ impl AudioPlayback {
                             // be flushed
                             return Ok(());
                         }
+                        // after the cancel check: a retired unit must not
+                        // consume a command meant for its successor
+                        poll_controls();
                         if self.ring.try_extend(pts, frame.samples()) {
                             break;
                         }

@@ -236,20 +236,17 @@ impl PlaybackUnit {
         let mut eof = false;
         // varispeed this unit currently runs at; fresh units start at 1x
         let mut applied_rate = 1.0_f64;
+        // the sinks poll this while waiting for queue space: not playing
+        // means nothing drains, so a blocked pump is the only place a
+        // queued play can be noticed
+        let poll_controls = || self.apply_play_or_pause();
 
         loop {
             if self.cancel.is_cancelled() {
                 return Ok(());
             }
 
-            if let Some(play_or_pause) = self.controls.play_or_pause.consume()  {
-                if play_or_pause {
-                    self.play();
-                }
-                else {
-                    self.transport.pause();
-                }
-            }
+            self.apply_play_or_pause();
 
             // peek, not consume: a fresh unit picks up the standing rate
             // even though a previous unit already took the update.
@@ -301,10 +298,10 @@ impl PlaybackUnit {
             let ret = unsafe { ff::av_read_frame(input.as_ptr(), packet.as_mut_ptr()) };
             if ret == ff::AVERROR_EOF {
                 if let Some(video) = video.as_mut() {
-                    video.drain(start_offset, &self.cancel, &self.seek)?;
+                    video.drain(start_offset, &self.cancel, &self.seek, &poll_controls)?;
                 }
                 if let Some(audio) = audio.as_mut() {
-                    audio.drain(start_offset, &self.cancel, &self.seek)?;
+                    audio.drain(start_offset, &self.cancel, &self.seek, &poll_controls)?;
                 }
                 eof = true;
                 continue;
@@ -321,11 +318,11 @@ impl PlaybackUnit {
             if let Some(video) = video.as_mut()
                 && video.handles(stream_index)
             {
-                video.handle_packet(&mut packet, start_offset, &self.cancel, &self.seek)?;
+                video.handle_packet(&mut packet, start_offset, &self.cancel, &self.seek, &poll_controls)?;
             } else if let Some(audio) = audio.as_mut()
                 && audio.handles(stream_index)
             {
-                audio.handle_packet(&mut packet, start_offset, &self.cancel, &self.seek)?;
+                audio.handle_packet(&mut packet, start_offset, &self.cancel, &self.seek, &poll_controls)?;
             }
             packet.unref();
         }
@@ -400,6 +397,17 @@ impl PlaybackUnit {
 
     pub(crate) fn state(&self) -> UUAVState {
         self.transport.state().into()
+    }
+
+    /// Applies a queued play/pause command, if any.
+    fn apply_play_or_pause(&self) {
+        if let Some(play) = self.controls.play_or_pause.consume() {
+            if play {
+                self.play();
+            } else {
+                self.transport.pause();
+            }
+        }
     }
 
     fn play(&self) {
