@@ -15,6 +15,7 @@ namespace UUAV.Example
         [SerializeField] private Button playButton;
         [SerializeField] private Button pauseButton;
         [SerializeField] private Button closeButton;
+        [SerializeField] private Toggle loopingToggle;
         [SerializeField] private TMP_InputField urlInput;
         [SerializeField] private TMP_Text statusText;
  
@@ -31,6 +32,7 @@ namespace UUAV.Example
             Assert.IsNotNull(closeButton);
             Assert.IsNotNull(urlInput);
             Assert.IsNotNull(statusText);
+            Assert.IsNotNull(loopingToggle);
 
             player = UUAVPlayer.New();
 
@@ -38,6 +40,9 @@ namespace UUAV.Example
             playButton.onClick.AddListener(() => player.Play());
             pauseButton.onClick.AddListener(() => player.Pause());
             closeButton.onClick.AddListener(() => player.CloseMedia());
+
+            loopingToggle.onValueChanged.AddListener(v => player.Looping = v);
+            player.Looping = loopingToggle.isOn;
         }
 
         private void Update()
