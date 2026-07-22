@@ -1,5 +1,4 @@
 using UnityEngine;
-using System;
 using UUAV;
 
 namespace RenderHeads.Media.AVProVideo
@@ -11,8 +10,6 @@ namespace RenderHeads.Media.AVProVideo
 
         private readonly UUAVPlayer player;
 
-        private bool looping;
-        private float playbackRate = 1f;
         private bool seekRequested;
 
         public UUAVBackend(UUAVPlayer player)
@@ -30,13 +27,6 @@ namespace RenderHeads.Media.AVProVideo
                     || state == UUAVState.Ready))
             {
                 seekRequested = false;
-            }
-
-            // TODO implement native looping (avoid the decoder drainage and keep the decoder warm)
-            if (looping && state == UUAVState.Ended)
-            {
-                player.Seek(0);
-                player.Play();
             }
         }
 
@@ -64,18 +54,15 @@ namespace RenderHeads.Media.AVProVideo
 
         public bool IsFinished() => player.State == UUAVState.Ended;
 
-        public bool IsLooping() => looping;
+        public bool IsLooping() => player.Looping;
 
-        public void SetLooping(bool value) => looping = value;
+        public void SetLooping(bool value) => player.Looping = value;
 
         public double GetCurrentTime() => player.CurrentTime;
 
-        public float GetPlaybackRate() => playbackRate;
+        public float GetPlaybackRate() => (float)player.PlaybackRate;
 
-
-        // TODO
-        // Implement playback speed in UUAV, no-op for realtime streams (or only applied for slow playback? but what about the buffering?)
-        public void SetPlaybackRate(float rate) => new NotImplementedException();
+        public void SetPlaybackRate(float rate) => player.PlaybackRate = rate;
 
         public ErrorCode GetLastError() =>
             player.State == UUAVState.Error ? ErrorCode.LoadFailed : ErrorCode.None;

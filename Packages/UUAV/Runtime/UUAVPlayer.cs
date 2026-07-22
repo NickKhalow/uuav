@@ -100,6 +100,18 @@ namespace UUAV
 
         public double Duration => ReadTime(NativeMethods.uuav_player_duration);
 
+        public bool Looping
+        {
+            get => NativeMethods.uuav_player_get_looping(playerId);
+            set => Check(NativeMethods.uuav_player_set_looping(playerId, value), "set looping");
+        }
+
+        public double PlaybackRate
+        {
+            get => NativeMethods.uuav_player_get_rate(playerId);
+            set => Check(NativeMethods.uuav_player_set_rate(playerId, value), "set rate");
+        }
+
         public RenderTexture? CurrentTexture =>
             targetTexture != null ? targetTexture : runtimeSurface;
 

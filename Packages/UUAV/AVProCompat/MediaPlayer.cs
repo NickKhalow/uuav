@@ -80,7 +80,7 @@ namespace RenderHeads.Media.AVProVideo
 
             if (autoPlay)
             {
-                uuavPlayer.Play(); // TODO validate it works, since PlaybackUnit creation is delayed in the native part
+                uuavPlayer.Play();
             }
 
             return true;

@@ -304,6 +304,24 @@ namespace UUAV
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern ResultFFI uuav_player_seek_async(ulong playerId, double time);
 
+        // persists across url switches
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ResultFFI uuav_player_set_looping(
+            ulong playerId,
+            [MarshalAs(UnmanagedType.U1)] bool looping
+        );
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static extern bool uuav_player_get_looping(ulong playerId);
+
+        // Not applicable for realtime streams
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ResultFFI uuav_player_set_rate(ulong playerId, double rate);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern double uuav_player_get_rate(ulong playerId);
+
         // ---- video -------------------------------------------------------
 
         // pass to GL.IssuePluginEvent / CommandBuffer.IssuePluginEvent
