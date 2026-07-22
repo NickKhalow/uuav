@@ -11,7 +11,7 @@ use crate::hw_device::HwDevice;
 use crate::playback::{
     CancelToken, ControlPush, PlaybackUnit, ReadOnlyCancelToken, UnitControls, fill_silence, DEFAULT_PLAYBACK_RATE
 };
-use crate::{AudioOptionsView, ErrorCallback, MediaInfo, UUAVState, VideoSize};
+use crate::{AudioOptionsView, ControlsState, ErrorCallback, MediaInfo, UUAVState, VideoSize};
 
 /// Lifecycle of the player's playback, shared with the playback thread.
 enum Playback {
@@ -200,12 +200,27 @@ impl UUAVPlayer {
         Ok(())
     }
 
+
     pub(crate) fn set_looping(&self, looping: bool) {
         self.looping_control.push(looping);
     }
 
     pub(crate) fn looping(&self) -> bool {
         self.looping_control.latest()
+    }
+
+    pub(crate) fn controls_state(&self) -> ControlsState {
+        let (play, play_pending) = self.play_control.snapshot();
+        let (looping, looping_pending) = self.looping_control.snapshot();
+        let (rate, rate_pending) = self.rate_control.snapshot();
+        ControlsState {
+            rate,
+            play: u8::from(play),
+            play_pending: u8::from(play_pending),
+            looping: u8::from(looping),
+            looping_pending: u8::from(looping_pending),
+            rate_pending: u8::from(rate_pending),
+        }
     }
 
     /// Varispeed rate in media seconds per wall second; persists across

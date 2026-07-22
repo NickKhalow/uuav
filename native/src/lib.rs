@@ -246,6 +246,23 @@ impl MediaInfo {
     }
 }
 
+/// Snapshot of the user-facing control values: the latest pushed
+/// intents, which the playback thread applies asynchronously.
+///
+/// A `*_pending` flag of 1 means that control's latest push has not
+/// been consumed by the playback thread yet. Each value/pending pair
+/// is consistent; the controls are sampled independently of each other.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ControlsState {
+    pub rate: f64,
+    pub play: u8,
+    pub play_pending: u8,
+    pub looping: u8,
+    pub looping_pending: u8,
+    pub rate_pending: u8,
+}
+
 #[repr(C)]
 pub struct NewPlayerResult {
     pub player_id: PlayerId,
@@ -563,6 +580,26 @@ unsafe fn uuav_player_duration_internal(
         .duration()
         .context("duration is not available")?;
     unsafe { out_duration.write(duration) };
+    Ok(())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn uuav_player_current_controls_state(
+    player_id: PlayerId,
+    out_state: *mut ControlsState,
+) -> ResultFFI {
+    unsafe { uuav_player_current_controls_state_internal(player_id, out_state) }.into()
+}
+
+unsafe fn uuav_player_current_controls_state_internal(
+    player_id: PlayerId,
+    out_state: *mut ControlsState,
+) -> anyhow::Result<()> {
+    ensure!(!out_state.is_null(), "out pointer is null");
+    let state = INIT_STATE.load();
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    let controls = runtime.player_by_id(player_id)?.controls_state();
+    unsafe { out_state.write(controls) };
     Ok(())
 }
 

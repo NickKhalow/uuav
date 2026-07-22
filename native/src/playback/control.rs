@@ -40,6 +40,13 @@ impl<T: Clone> ControlPush<T> {
         self.0.lock().value.clone()
     }
 
+    /// Current value plus whether the latest push is still awaiting
+    /// consumption, as one atomic pair.
+    pub(crate) fn snapshot(&self) -> (T, bool) {
+        let state = self.0.lock();
+        (state.value.clone(), state.pending)
+    }
+
     /// A consumer half on the same slot. Weak, so a consumer neither
     /// keeps a freed player's control state alive nor obeys it.
     pub(crate) fn consumer(&self) -> ControlConsume<T> {
@@ -129,6 +136,21 @@ mod tests {
 
         push.push(7);
         assert_eq!(zombie.consume().context("pending update")?, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_reports_pending_until_consumed() -> Result<()> {
+        let push = ControlPush::new(1);
+        let consume = push.consumer();
+
+        assert_eq!(push.snapshot(), (1, false), "nothing pushed yet");
+
+        push.push(2);
+        assert_eq!(push.snapshot(), (2, true), "push awaits consumption");
+
+        consume.consume().context("pending update")?;
+        assert_eq!(push.snapshot(), (2, false), "consumed, value persists");
         Ok(())
     }
 
