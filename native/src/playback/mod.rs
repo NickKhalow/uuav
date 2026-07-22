@@ -10,13 +10,15 @@
 mod audio_playback;
 mod audio_ring;
 mod clock;
+mod control;
 mod input;
 mod transport;
 mod unit;
 mod util;
 mod video_playback;
 
-pub(crate) use unit::PlaybackUnit;
+pub(crate) use control::ControlPush;
+pub(crate) use unit::{PlaybackUnit, UnitControls, DEFAULT_PLAYBACK_RATE};
 pub(crate) use util::CancelToken;
 pub(crate) use util::ReadOnlyCancelToken;
 
