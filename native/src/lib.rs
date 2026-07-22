@@ -668,6 +668,60 @@ fn uuav_player_seek_async_internal(player_id: PlayerId, time: f64) -> anyhow::Re
     runtime.player_by_id(player_id)?.seek_intent(time)
 }
 
+// persists across url switches
+#[unsafe(no_mangle)]
+pub extern "C" fn uuav_player_set_looping(player_id: PlayerId, looping: u8) -> ResultFFI {
+    uuav_player_set_looping_internal(player_id, looping != 0).into()
+}
+
+fn uuav_player_set_looping_internal(player_id: PlayerId, looping: bool) -> anyhow::Result<()> {
+    let state = INIT_STATE.load();
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    runtime.player_by_id(player_id)?.set_looping(looping);
+    Ok(())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn uuav_player_get_looping(player_id: PlayerId) -> u8 {
+    let state = INIT_STATE.load();
+    let Some(runtime) = state.as_ref() else {
+        return 0;
+    };
+    runtime
+        .player_by_id(player_id)
+        .map_or(0, |player| u8::from(player.looping()))
+}
+
+// Expect: realtime streams (no duration) keep playing at 1x
+#[unsafe(no_mangle)]
+pub extern "C" fn uuav_player_set_rate(player_id: PlayerId, rate: f64) -> ResultFFI {
+    uuav_player_set_rate_internal(player_id, rate).into()
+}
+
+fn uuav_player_set_rate_internal(player_id: PlayerId, rate: f64) -> anyhow::Result<()> {
+    ensure!(
+        rate.is_finite() && rate > 0.0,
+        "playback rate must be finite and positive, got {rate}"
+    );
+    let state = INIT_STATE.load();
+    let runtime = state.as_ref().context(ERR_NO_RUNTIME)?;
+    runtime.player_by_id(player_id)?.set_rate(rate);
+    Ok(())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn uuav_player_get_rate(player_id: PlayerId) -> f64 {
+    const DEFAULT_RATE: f64 = 1.0;
+
+    let state = INIT_STATE.load();
+    let Some(runtime) = state.as_ref() else {
+        return DEFAULT_RATE;
+    };
+    runtime
+        .player_by_id(player_id)
+        .map_or(DEFAULT_RATE, |player| player.rate())
+}
+
 // ---- video -----------------------------------------------------------
 
 // Unity's UnityRenderingEvent signature
