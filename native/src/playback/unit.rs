@@ -6,6 +6,7 @@ use std::sync::Once;
 use std::thread;
 
 use super::audio_playback::{AudioPlayback, AudioReader};
+use super::control::ControlConsume;
 use super::input::Input;
 use super::transport::{AtomicTransport, PlaybackState};
 use super::util::{AtomicSeekSlot, PLAYBACK_POLL, ReadOnlyCancelToken};
@@ -22,6 +23,8 @@ static NETWORK_INIT: Once = Once::new();
 /// A video frame is presented once the clock is within this of its pts.
 const VIDEO_PRESENT_BIAS: f64 = 0.005;
 
+pub const DEFAULT_PLAYBACK_RATE: f64 = 1.0;
+
 /// The demux/decode half of a playback: everything [`PlaybackUnit::run_blocking`]
 /// needs mutable and exclusive on the playback thread.
 pub(crate) struct Pipeline {
@@ -31,6 +34,15 @@ pub(crate) struct Pipeline {
     /// Timestamp of the first frame; the media timeline is normalized so
     /// playback starts at 0.
     start_offset: f64,
+}
+
+pub(crate) struct UnitControls {
+    /// `true` = a play queued while no unit was live, `false` = a pause
+    pub(crate) play_or_pause: ControlConsume<bool>,
+    /// Wrap at EOF on the playback thread instead of settling into ENDED.
+    pub(crate) looping: ControlConsume<bool>,
+    /// Desired playback rate, in media seconds per wall second.
+    pub(crate) rate: ControlConsume<f64>,
 }
 
 /// Playback of a single url: the shared state the engine-facing threads
@@ -43,6 +55,7 @@ pub(crate) struct PlaybackUnit {
     cancel: ReadOnlyCancelToken,
     /// Coalescing seek command; the playback thread services it.
     seek: AtomicSeekSlot,
+    controls: UnitControls,
     /// Playback state and media clock, as one atomic snapshot.
     transport: AtomicTransport,
     /// Audio-thread half of the playback's audio; the pipeline's
@@ -118,6 +131,7 @@ impl PlaybackUnit {
         cancel: ReadOnlyCancelToken,
         error_callback: ErrorCallback,
         protocol_whitelist: &StreamingProtocol,
+        controls: UnitControls,
     ) -> Result<(Self, Pipeline)> {
         NETWORK_INIT.call_once(|| {
             unsafe { ff::avformat_network_init() };
@@ -180,6 +194,7 @@ impl PlaybackUnit {
             media_info,
             cancel,
             seek: AtomicSeekSlot::new(),
+            controls,
             transport: AtomicTransport::new(),
             audio: audio_reader,
             video: video_reader,
@@ -219,10 +234,37 @@ impl PlaybackUnit {
         let mut packet = OwnedPacket::new()?;
         // whether the demuxer ran out of input; playback then drains the sinks
         let mut eof = false;
+        // varispeed this unit currently runs at; fresh units start at 1x
+        let mut applied_rate = 1.0_f64;
 
         loop {
             if self.cancel.is_cancelled() {
                 return Ok(());
+            }
+
+            if let Some(play_or_pause) = self.controls.play_or_pause.consume()  {
+                if play_or_pause {
+                    self.play();
+                }
+                else {
+                    self.pause();
+                }
+            }
+
+            // peek, not consume: a fresh unit picks up the standing rate
+            // even though a previous unit already took the update.
+            // realtime streams (no duration) stay at 1x
+            let rate = if self.duration.is_some() {
+                self.controls.rate.peek().unwrap_or(DEFAULT_PLAYBACK_RATE)
+            } else {
+                DEFAULT_PLAYBACK_RATE
+            };
+            if rate.to_bits() != applied_rate.to_bits() {
+                self.transport.set_rate(rate);
+                if let Some(audio) = audio.as_mut() {
+                    audio.set_rate(rate);
+                }
+                applied_rate = rate;
             }
 
             if let Some(target) = self.seek.take() {
@@ -242,6 +284,15 @@ impl PlaybackUnit {
             }
 
             if eof {
+                if self.loop_wrap(
+                    &input,
+                    video.as_mut(),
+                    audio.as_mut(),
+                    &mut eof,
+                    start_offset,
+                ) {
+                    continue;
+                }
                 self.settle_ended(video.as_ref(), audio.as_ref());
                 thread::sleep(PLAYBACK_POLL);
                 continue;
@@ -278,6 +329,38 @@ impl PlaybackUnit {
             }
             packet.unref();
         }
+    }
+
+    /// [playback thread] At EOF with looping on: once the sinks have
+    /// played the tail out, wraps back to the start right here — the
+    /// input and the decoders stay warm, and no ENDED/seek round-trip is
+    /// exposed to the engine. Returns whether the wrap happened.
+    fn loop_wrap(
+        &self,
+        input: &Input,
+        video: Option<&mut VideoPlayback>,
+        audio: Option<&mut AudioPlayback>,
+        eof: &mut bool,
+        start_offset: f64,
+    ) -> bool {
+        if !self.controls.looping.peek().unwrap_or(false) || !self.transport.is_playing() {
+            return false;
+        }
+
+        let drained = video.as_deref().is_none_or(VideoPlayback::is_drained)
+            && audio.as_deref().is_none_or(AudioPlayback::is_drained);
+        if !drained {
+            return false;
+        }
+
+        // non-fatal, like a user seek; falling through settles into ENDED,
+        // where is_playing turns false, so a failed wrap does not retry
+        if let Err(e) = self.apply_seek(input, video, audio, eof, 0.0, start_offset) {
+            self.error_callback
+                .report(format!("loop restart failed: {e}"));
+            return false;
+        }
+        true
     }
 
     /// Fully decoded; once the sinks have drained, holds the clock and
@@ -319,7 +402,7 @@ impl PlaybackUnit {
         self.transport.state().into()
     }
 
-    pub(crate) fn play(&self) {
+    fn play(&self) {
         match self.transport.state() {
             PlaybackState::Ready | PlaybackState::Paused => {}
             PlaybackState::Playing => return,
@@ -331,7 +414,7 @@ impl PlaybackUnit {
         self.transport.play();
     }
 
-    pub(crate) fn pause(&self) {
+    fn pause(&self) {
         match self.transport.state() {
             PlaybackState::Playing => self.transport.pause(),
             PlaybackState::Ready | PlaybackState::Paused | PlaybackState::Ended => {}
