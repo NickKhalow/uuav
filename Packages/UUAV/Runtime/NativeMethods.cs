@@ -154,6 +154,27 @@ namespace UUAV
         }
     }
 
+    // Snapshot of the user-facing control values: the latest pushed
+    // intents, which the playback thread applies asynchronously. A
+    // *Pending flag means that control's latest push has not been
+    // consumed by the playback thread yet.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ControlsState
+    {
+        public double Rate;
+        private readonly byte play;
+        private readonly byte playPending;
+        private readonly byte looping;
+        private readonly byte loopingPending;
+        private readonly byte ratePending;
+
+        public bool Play => play != 0;
+        public bool PlayPending => playPending != 0;
+        public bool Looping => looping != 0;
+        public bool LoopingPending => loopingPending != 0;
+        public bool RatePending => ratePending != 0;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct Status
     {
@@ -296,6 +317,12 @@ namespace UUAV
         public static extern ResultFFI uuav_player_get_media_info(
             ulong playerId,
             out MediaInfo info
+        );
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ResultFFI uuav_player_current_controls_state(
+            ulong playerId,
+            out ControlsState state
         );
 
         // ---- transport (commands: set flags, decoder thread obeys) ------

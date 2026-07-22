@@ -129,6 +129,23 @@ namespace UUAV
             Debug.Log($"[UUAV] state: {NativeMethods.uuav_player_state(playerId).ToStringNoAlloc()}");
         }
 
+        [ContextMenu(nameof(PrintControlsState))]
+        private void PrintControlsState()
+        {
+            var result = NativeMethods.uuav_player_current_controls_state(playerId, out var controls);
+            if (result.IsOk == false)
+            {
+                Debug.LogError($"[UUAV] controls state: {result.ConsumeError()}");
+                return;
+            }
+
+            Debug.Log(
+                $"[UUAV] controls: play={controls.Play} (pending={controls.PlayPending}) "
+                + $"looping={controls.Looping} (pending={controls.LoopingPending}) "
+                + $"rate={controls.Rate} (pending={controls.RatePending})"
+            );
+        }
+
         [ContextMenu(nameof(OpenMedia))]
         private void OpenMedia()
         {
