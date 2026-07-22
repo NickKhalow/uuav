@@ -53,6 +53,7 @@ use std::{
     ptr,
     sync::{Arc, Weak, atomic::AtomicU64},
 };
+use playback::DEFAULT_PLAYBACK_RATE;
 
 const ERR_NO_RUNTIME: &str = "Runtime is not found";
 const ERR_NO_PLAYER: &str = "player with specific id not found";
@@ -711,15 +712,13 @@ fn uuav_player_set_rate_internal(player_id: PlayerId, rate: f64) -> anyhow::Resu
 
 #[unsafe(no_mangle)]
 pub extern "C" fn uuav_player_get_rate(player_id: PlayerId) -> f64 {
-    const DEFAULT_RATE: f64 = 1.0;
-
     let state = INIT_STATE.load();
     let Some(runtime) = state.as_ref() else {
-        return DEFAULT_RATE;
+        return DEFAULT_PLAYBACK_RATE;
     };
     runtime
         .player_by_id(player_id)
-        .map_or(DEFAULT_RATE, |player| player.rate())
+        .map_or(DEFAULT_PLAYBACK_RATE, |player| player.rate())
 }
 
 // ---- video -----------------------------------------------------------
