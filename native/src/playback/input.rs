@@ -123,9 +123,9 @@ mod tests {
     fn open_error(whitelist: &str) -> Result<String> {
         let whitelist = CString::new(whitelist)?;
         // SAFETY: `whitelist` is a valid NUL-terminated C string.
-        let protocol = unsafe { StreamingProtocol::new(whitelist.as_ptr()) }.unwrap();
+        let protocol = unsafe { StreamingProtocol::new(whitelist.as_ptr()) }?;
         match Input::open(cancel(), FILE_URL, &protocol) {
-            Ok(_) => panic!("opening a nonexistent file must fail"),
+            Ok(_) => Err(anyhow!("opening a nonexistent file must fail")),
             Err(e) => Ok(e.to_string().to_lowercase()),
         }
     }
@@ -135,7 +135,10 @@ mod tests {
         // Protocol allowed → the failure is the missing file, meaning FFmpeg
         // got past the whitelist gate and hit the filesystem.
         let msg = open_error("file")?;
-        assert!(msg.contains("no such file"), "expected a filesystem error, got: {msg}");
+        assert!(
+            msg.contains("no such file"),
+            "expected a filesystem error, got: {msg}"
+        );
         Ok(())
     }
 

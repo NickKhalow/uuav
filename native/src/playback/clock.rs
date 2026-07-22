@@ -12,6 +12,8 @@ pub(super) const CLOCK_SNAP_THRESHOLD: f64 = 0.05;
 pub(super) struct Clock {
     base: f64,
     anchor: Option<Instant>,
+    /// Media seconds advanced per wall-clock second while running.
+    rate: f64,
 }
 
 impl Clock {
@@ -19,11 +21,15 @@ impl Clock {
         Self {
             base: 0.0,
             anchor: None,
+            rate: 1.0,
         }
     }
 
     pub(super) fn now(&self) -> f64 {
-        self.base + self.anchor.map_or(0.0, |a| a.elapsed().as_secs_f64())
+        self.base
+            + self
+                .anchor
+                .map_or(0.0, |a| a.elapsed().as_secs_f64() * self.rate)
     }
 
     /// Re-anchored at `time`, preserving the running/held state.
@@ -31,6 +37,7 @@ impl Clock {
         Self {
             base: time,
             anchor: self.anchor.map(|_| Instant::now()),
+            rate: self.rate,
         }
     }
 
@@ -38,6 +45,7 @@ impl Clock {
         Self {
             base: self.base,
             anchor: self.anchor.or_else(|| Some(Instant::now())),
+            rate: self.rate,
         }
     }
 
@@ -45,6 +53,17 @@ impl Clock {
         Self {
             base: self.now(),
             anchor: None,
+            rate: self.rate,
+        }
+    }
+
+    /// Runs at `rate` from here on: re-anchored at the current time, so
+    /// the already-elapsed span keeps the scale it was played at.
+    pub(super) fn with_rate(self, rate: f64) -> Self {
+        Self {
+            base: self.now(),
+            anchor: self.anchor.map(|_| Instant::now()),
+            rate,
         }
     }
 }

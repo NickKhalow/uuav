@@ -102,7 +102,12 @@ impl From<&StreamingProtocol> for AvDict {
         // surfaces later as an open error.
         // Copies the protocol value
         unsafe {
-            ff::av_dict_set(&mut dict, c"protocol_whitelist".as_ptr(), protocol.0.as_ptr(), 0);
+            ff::av_dict_set(
+                &mut dict,
+                c"protocol_whitelist".as_ptr(),
+                protocol.0.as_ptr(),
+                0,
+            );
         }
         Self(dict)
     }

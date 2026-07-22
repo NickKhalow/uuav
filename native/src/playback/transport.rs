@@ -87,6 +87,15 @@ impl AtomicTransport {
         });
     }
 
+    /// Changes the clock rate in place, preserving the state and the
+    /// current media time.
+    pub(super) fn set_rate(&self, rate: f64) {
+        self.0.rcu(|s| Snapshot {
+            state: s.state,
+            clock: s.clock.with_rate(rate),
+        });
+    }
+
     /// A seek was applied: re-anchors the clock at `target`. A seek out of
     /// ENDED lands paused; `play` (which queues the restart seek itself)
     /// flips the state to PLAYING on its own.
