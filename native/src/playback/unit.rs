@@ -247,7 +247,7 @@ impl PlaybackUnit {
                     self.play();
                 }
                 else {
-                    self.pause();
+                    self.transport.pause();
                 }
             }
 
@@ -412,13 +412,6 @@ impl PlaybackUnit {
             }
         }
         self.transport.play();
-    }
-
-    fn pause(&self) {
-        match self.transport.state() {
-            PlaybackState::Playing => self.transport.pause(),
-            PlaybackState::Ready | PlaybackState::Paused | PlaybackState::Ended => {}
-        }
     }
 
     pub(crate) fn seek_intent(&self, time: f64) {

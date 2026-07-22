@@ -73,10 +73,15 @@ impl AtomicTransport {
 
     /// Holds the clock and flags PAUSED.
     pub(super) fn pause(&self) {
-        self.0.rcu(|s| Snapshot {
-            state: PlaybackState::Paused,
-            clock: s.clock.held(),
-        });
+        match self.state() {
+            PlaybackState::Playing => {
+                self.0.rcu(|s| Snapshot {
+                    state: PlaybackState::Paused,
+                    clock: s.clock.held(),
+                });
+            },
+            PlaybackState::Ready | PlaybackState::Paused | PlaybackState::Ended => {}
+        }
     }
 
     /// Fully consumed: holds the clock and flags ENDED.
