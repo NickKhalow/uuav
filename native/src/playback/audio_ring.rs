@@ -51,17 +51,22 @@ pub(super) struct AudioRing {
 
 impl AudioRing {
     /// Creates a ring for `audio_options` and publishes its receiver into
-    /// `rx_slot`.
-    pub(super) fn new(audio_options: AudioOptions, rx_slot: SharedAudioReceiver) -> Self {
-        let (tx, rx) = split(audio_options);
+    /// `rx_slot`. `playback_rate` is the varispeed the buffered samples
+    /// were converted for; it scales the receiver's media-time math.
+    pub(super) fn new(
+        audio_options: AudioOptions,
+        playback_rate: f64,
+        rx_slot: SharedAudioReceiver,
+    ) -> Self {
+        let (tx, rx) = split(audio_options, playback_rate);
         *rx_slot.lock() = Some(rx);
         Self { tx, rx_slot }
     }
 
-    /// Replaces both halves with a fresh ring for `audio_options`,
-    /// discarding whatever the old ring still buffered.
-    pub(super) fn replace(&mut self, audio_options: AudioOptions) {
-        let (tx, rx) = split(audio_options);
+    /// Replaces both halves with a fresh ring for `audio_options` at
+    /// `playback_rate`, discarding whatever the old ring still buffered.
+    pub(super) fn replace(&mut self, audio_options: AudioOptions, playback_rate: f64) {
+        let (tx, rx) = split(audio_options, playback_rate);
         self.tx = tx;
         *self.rx_slot.lock() = Some(rx);
     }
@@ -78,7 +83,7 @@ impl AudioRing {
     }
 }
 
-fn split(audio_options: AudioOptions) -> (AudioSender, AudioReceiver) {
+fn split(audio_options: AudioOptions, playback_rate: f64) -> (AudioSender, AudioReceiver) {
     let per_second = (audio_options.sample_rate.get() as usize)
         .saturating_mul(audio_options.channels_usize().get());
     let capacity = (per_second as f64 * AUDIO_BUFFER_SECONDS) as usize;
@@ -99,6 +104,7 @@ fn split(audio_options: AudioOptions) -> (AudioSender, AudioReceiver) {
             anchor: None,
             pending: None,
             audio_options,
+            playback_rate,
         },
     )
 }
@@ -150,6 +156,10 @@ pub(super) struct AudioReceiver {
     /// A marker taken off the ring that still lies ahead of `read`.
     pending: Option<PtsMarker>,
     audio_options: AudioOptions,
+    /// Varispeed the samples were converted for: one output frame covers
+    /// `playback_rate / sample_rate` media seconds. Constant per ring —
+    /// a rate change replaces the whole ring.
+    playback_rate: f64,
 }
 
 impl AudioReceiver {
@@ -183,7 +193,7 @@ impl AudioReceiver {
         self.anchor.map(|marker| {
             let samples_past = (self.read.saturating_sub(marker.position)) as usize;
             let frames_past = samples_past / self.channel_count();
-            marker.pts + frames_past as f64 / self.rate_f64()
+            marker.pts + frames_past as f64 * self.playback_rate / self.rate_f64()
         })
     }
 
@@ -198,7 +208,8 @@ impl AudioReceiver {
         }
         if drift < -AUDIO_DRIFT_TOLERANCE {
             let channels_nz = self.channel_count();
-            let late_frames = (-drift * self.rate_f64()) as usize;
+            // a late media span occupies span / rate output frames
+            let late_frames = (-drift * self.rate_f64() / self.playback_rate) as usize;
             let buffered_frames = self.samples.occupied_len() / channels_nz;
             let drop_samples = late_frames
                 .min(buffered_frames)

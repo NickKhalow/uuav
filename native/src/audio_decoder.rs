@@ -52,13 +52,24 @@ struct Resampler {
     swr: OwnedSwr,
     input: SwrInput,
     output: AudioOptions,
+    /// The input rate the resampler was configured with: the stream's real
+    /// rate scaled by the playback rate (varispeed), so one media second
+    /// converts into `1 / rate` engine seconds and pitch follows.
+    scaled_in_rate: c_int,
 }
 
 impl Resampler {
     /// Builds a resampler converting from the frame's sample format to
-    /// interleaved `f32` at `output`.
-    fn new(frame: &OwnedFrame, output: AudioOptions) -> Result<Self> {
+    /// interleaved `f32` at `output`, sped up by `playback_rate`.
+    fn new(frame: &OwnedFrame, output: AudioOptions, playback_rate: f64) -> Result<Self> {
         let input = SwrInput::from_frame_options(frame)?;
+        let scaled = (f64::from(input.rate) * playback_rate).round();
+        ensure!(
+            scaled >= 1.0 && scaled <= f64::from(c_int::MAX),
+            "playback rate {playback_rate} is out of range for a {} Hz stream",
+            input.rate
+        );
+        let scaled_in_rate = scaled as c_int;
         let out_layout = OwnedChannelLayout::default_for(output.channels);
         let swr = OwnedSwr::new(
             out_layout.as_ref(),
@@ -66,10 +77,15 @@ impl Resampler {
             output.sample_rate,
             frame.ch_layout(),
             unsafe { mem::transmute::<c_int, ff::AVSampleFormat>(input.format) },
-            input.rate,
+            scaled_in_rate,
         )?;
 
-        Ok(Self { swr, input, output })
+        Ok(Self {
+            swr,
+            input,
+            output,
+            scaled_in_rate,
+        })
     }
 
     /// Whether the frame still matches the input this resampler was built
@@ -86,11 +102,14 @@ impl Resampler {
         let in_rate = frame.sample_rate();
         ensure!(in_rate > 0, "invalid audio frame sample rate: {in_rate}");
         let in_samples = frame.nb_samples();
-        let delay = self.swr.apply_delay_and_modify(i64::from(in_rate));
+        // the resampler counts input samples in its own (rate-scaled) domain
+        let delay = self
+            .swr
+            .apply_delay_and_modify(i64::from(self.scaled_in_rate));
 
         let out_capacity: c_int = {
             let pending_in_samples = delay as f64 + f64::from(in_samples);
-            let rate_ratio = self.output.sample_rate_f64() / f64::from(in_rate);
+            let rate_ratio = self.output.sample_rate_f64() / f64::from(self.scaled_in_rate);
             let exact_out_samples = pending_in_samples * rate_ratio;
             // generous headroom over the exact rescale to absorb rounding
             (exact_out_samples.ceil() + 32.0) as c_int
@@ -134,6 +153,9 @@ pub(crate) struct AudioDecoder {
     time_base: ff::AVRational,
     resampler: Option<Resampler>,
     audio_options: AudioOptions,
+    /// Varispeed factor baked into the resampler ratio; see
+    /// [`Resampler::scaled_in_rate`].
+    playback_rate: f64,
 }
 
 impl AudioDecoder {
@@ -158,6 +180,7 @@ impl AudioDecoder {
             time_base: stream.time_base(),
             resampler: None,
             audio_options,
+            playback_rate: 1.0,
         })
     }
 
@@ -168,6 +191,17 @@ impl AudioDecoder {
             return false;
         }
         self.audio_options = options;
+        self.resampler = None;
+        true
+    }
+
+    /// Applies a new playback rate. Returns `true` when it changed
+    /// (callers should discard already-buffered samples).
+    pub(crate) fn set_rate(&mut self, rate: f64) -> bool {
+        if rate.to_bits() == self.playback_rate.to_bits() {
+            return false;
+        }
+        self.playback_rate = rate;
         self.resampler = None;
         true
     }
@@ -222,10 +256,10 @@ impl AudioDecoder {
                 if resampler.matches(frame) {
                     resampler
                 } else {
-                    Resampler::new(frame, self.audio_options)?
+                    Resampler::new(frame, self.audio_options, self.playback_rate)?
                 }
             }
-            None => Resampler::new(frame, self.audio_options)?,
+            None => Resampler::new(frame, self.audio_options, self.playback_rate)?,
         };
 
         let relevant = self.resampler.insert(relevant);

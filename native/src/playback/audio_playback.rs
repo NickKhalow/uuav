@@ -76,6 +76,9 @@ pub(super) struct AudioPlayback {
     ring: AudioRing,
     audio_out: AudioOptionsView,
     stream_index: c_int,
+    /// Varispeed currently applied; new rings must carry it so their
+    /// media-time math matches the converted samples.
+    playback_rate: f64,
 }
 
 impl AudioPlayback {
@@ -86,13 +89,24 @@ impl AudioPlayback {
         rx_slot: SharedAudioReceiver,
     ) -> Result<Self> {
         let decoder = AudioDecoder::new(stream, audio_out.current())?;
-        let ring = AudioRing::new(decoder.audio_options(), rx_slot);
+        let playback_rate = super::unit::DEFAULT_PLAYBACK_RATE;
+        let ring = AudioRing::new(decoder.audio_options(), playback_rate, rx_slot);
         Ok(Self {
             decoder,
             ring,
             audio_out,
             stream_index,
+            playback_rate,
         })
+    }
+
+    /// Applies a new varispeed rate: rebuilds the resampler ratio and
+    /// drops already-converted samples (same policy as an audio reconfig).
+    pub(super) fn set_rate(&mut self, rate: f64) {
+        if self.decoder.set_rate(rate) {
+            self.playback_rate = rate;
+            self.ring.replace(self.decoder.audio_options(), rate);
+        }
     }
 
     pub(super) const fn handles(&self, stream_index: c_int) -> bool {
@@ -110,7 +124,7 @@ impl AudioPlayback {
     ) -> Result<()> {
         let options = self.audio_out.current();
         if self.decoder.set_output(options) {
-            self.ring.replace(options);
+            self.ring.replace(options, self.playback_rate);
         }
         self.decoder.send(packet.as_mut_ptr())?;
         self.pump(start_offset, cancel, seek)
@@ -130,7 +144,8 @@ impl AudioPlayback {
     /// Discards everything belonging to the pre-seek position.
     pub(super) fn flush_for_seek(&mut self) {
         self.decoder.flush();
-        self.ring.replace(self.decoder.audio_options());
+        self.ring
+            .replace(self.decoder.audio_options(), self.playback_rate);
     }
 
     /// Whether the audio thread has consumed every pushed sample.
