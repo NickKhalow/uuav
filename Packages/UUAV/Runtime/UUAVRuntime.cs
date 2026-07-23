@@ -14,9 +14,16 @@ namespace UUAV
         // Media URLs come from untrusted scenes, so this omits file: and the nested-protocol pivots (concat, subfile, ...); 
         private const string UNTRUSTED_STREAMING_PROTOCOLS = "https,http,tls,tcp,crypto,data,udp,rtp,rtcp,rtsp";
 
+        // Default FFmpeg verbosity. Warning (not Info) keeps native->managed call
+        // volume low, per the too-many-threads note below; adjust at runtime via
+        // SetLogLevel.
+        private const UUAVLogLevel DefaultLogLevel = UUAVLogLevel.Warning;
+
         // TODO make sure to don't overabuse the calls from native parts using too many threads (we had a similar issue before)
-        // rooted for the process lifetime: the native side keeps this fn pointer
+        // rooted for the process lifetime: the native side keeps these fn pointers
         private static readonly ErrorCallback errorCallback = OnNativeError;
+        private static readonly LogCallback warningCallback = OnNativeWarning;
+        private static readonly LogCallback logCallback = OnNativeLog;
 
         private static IntPtr renderCallback;
 
@@ -57,7 +64,7 @@ namespace UUAV
 #endif
 
             using var probe = ProbeTexture.New();
-            var result = NativeMethods.uuav_init(probe.NativePtr(), audioOptions, errorCallback, protocols);
+            var result = NativeMethods.uuav_init(probe.NativePtr(), audioOptions, errorCallback, warningCallback, logCallback, protocols, (int)DefaultLogLevel);
 
             if (result.IsOk == false)
             {
@@ -98,6 +105,26 @@ namespace UUAV
         private static void OnNativeError(IntPtr message)
         {
             Debug.LogError($"[UUAV] {Utf8.PtrToString(message)}");
+        }
+
+        // FFmpeg diagnostics, routed by native by severity. Same threading
+        // contract as OnNativeError: any FFmpeg thread, native owns the string.
+        [MonoPInvokeCallback(typeof(LogCallback))]
+        private static void OnNativeWarning(IntPtr message)
+        {
+            Debug.LogWarning($"[UUAV] {Utf8.PtrToString(message)}");
+        }
+
+        [MonoPInvokeCallback(typeof(LogCallback))]
+        private static void OnNativeLog(IntPtr message)
+        {
+            Debug.Log($"[UUAV] {Utf8.PtrToString(message)}");
+        }
+
+        // Adjust FFmpeg verbosity at runtime (no-op if not yet initialized).
+        public static void SetLogLevel(UUAVLogLevel level)
+        {
+            NativeMethods.uuav_set_log_level((int)level);
         }
 
 #if UNITY_EDITOR

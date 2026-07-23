@@ -8,6 +8,24 @@ namespace UUAV
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void ErrorCallback(IntPtr message);
 
+    // FFmpeg log sinks: one already-formatted, NUL-terminated line per call.
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void LogCallback(IntPtr message);
+
+    // Mirrors FFmpeg's lavu_log_constants; cast to int at the FFI boundary.
+    public enum UUAVLogLevel
+    {
+        Quiet = -8,
+        Panic = 0,
+        Fatal = 8,
+        Error = 16,
+        Warning = 24,
+        Info = 32,
+        Verbose = 40,
+        Debug = 48,
+        Trace = 56,
+    }
+
     public enum UUAVState
     {
         Closed,
@@ -241,8 +259,14 @@ namespace UUAV
             IntPtr probe_texture,
             AudioOptions audioOptions,
             ErrorCallback? errorCallback,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string protocolWhitelist
+            LogCallback? warningCallback,
+            LogCallback? logCallback,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string protocolWhitelist,
+            int logLevel
         );
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void uuav_set_log_level(int level);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern void uuav_deinit();

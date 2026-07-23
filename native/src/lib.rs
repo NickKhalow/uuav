@@ -42,6 +42,7 @@ mod video_output;
 use anyhow::{Context as _, ensure};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use dashmap::DashMap;
+use ffmpeg_sys_next as ff;
 use ffutil::StreamingProtocol;
 use hw_device::HwDevice;
 use player::UUAVPlayer;
@@ -49,9 +50,9 @@ use std::{
     convert::AsRef,
     ffi::{CStr, CString},
     num::{NonZeroI32, NonZeroUsize},
-    os::raw::{c_char, c_void},
+    os::raw::{c_char, c_int, c_void},
     ptr,
-    sync::{Arc, Weak, atomic::AtomicU64},
+    sync::{Arc, Once, Weak, atomic::AtomicU64},
 };
 use playback::DEFAULT_PLAYBACK_RATE;
 
@@ -61,15 +62,32 @@ const ERR_NO_PLAYER: &str = "player with specific id not found";
 static INIT_STATE: ArcSwapOption<Runtime> = ArcSwapOption::const_empty();
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
+// installs the FFmpeg log trampoline exactly once, process-wide
+static LOG_INIT: Once = Once::new();
+
+// FFmpeg `lavu_log_constants`; local copies avoid depending on binding names.
+// Messages at or below these levels route to the matching Unity sink.
+const AV_LOG_ERROR: c_int = 16;
+const AV_LOG_WARNING: c_int = 24;
+
+// Stack buffer for one formatted FFmpeg log line (prefix + message).
+const LOG_LINE_CAP: c_int = 1024;
+
 struct Runtime {
     device: HwDevice,
     error_callback: Arc<RawErrorCallback>,
+    warning_callback: Arc<RawLogCallback>,
+    log_callback: Arc<RawLogCallback>,
     audio_options: Arc<ArcSwap<AudioOptions>>,
     protocol_whitelist: Arc<StreamingProtocol>,
     registry: DashMap<PlayerId, UUAVPlayer>,
 }
 
 type RawErrorCallback = extern "C" fn(*const c_char);
+
+// FFmpeg log sinks share the error-callback shape: a single NUL-terminated,
+// already-formatted line. Level selects which sink native routes to.
+type RawLogCallback = extern "C" fn(*const c_char);
 
 // no-op when the raw callback is dropped on deinit
 #[derive(Clone)]
@@ -358,18 +376,81 @@ pub const extern "C" fn uuav_abi_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), '\0').as_ptr().cast()
 }
 
+/// Process-global FFmpeg log callback installed via `av_log_set_callback`.
+///
+/// Fires from arbitrary (possibly concurrent) FFmpeg threads. It no-ops once
+/// the runtime is torn down, applies the configured verbosity threshold itself
+/// (FFmpeg leaves that to the callback), formats the line — including the
+/// `AVClass`-derived `[component @ 0x..]` prefix — via `av_log_format_line2`,
+/// then routes to the Unity sink matching the severity. `vl` is this target's
+/// `va_list` (a plain `*mut c_char` on `x86_64-pc-windows-gnu`).
+unsafe extern "C" fn uuav_ffmpeg_log(
+    avcl: *mut c_void,
+    level: c_int,
+    fmt: *const c_char,
+    vl: *mut c_char,
+) {
+    let state = INIT_STATE.load();
+    let Some(s) = state.as_ref() else {
+        return;
+    };
+
+    // FFmpeg only stores the threshold; filtering is the callback's job.
+    if level > unsafe { ff::av_log_get_level() } {
+        return;
+    }
+
+    let mut line = [0 as c_char; LOG_LINE_CAP as usize];
+    let mut print_prefix: c_int = 1;
+    unsafe {
+        ff::av_log_format_line2(
+            avcl,
+            level,
+            fmt,
+            vl,
+            line.as_mut_ptr(),
+            LOG_LINE_CAP,
+            &mut print_prefix,
+        );
+    }
+
+    let callback = if level <= AV_LOG_ERROR {
+        &s.error_callback
+    } else if level <= AV_LOG_WARNING {
+        &s.warning_callback
+    } else {
+        &s.log_callback
+    };
+    // av_log_format_line2 always NUL-terminates within the buffer.
+    callback(line.as_ptr());
+}
+
+/// Sets the FFmpeg verbosity threshold (an `AV_LOG_*` constant). Messages above
+/// this level are dropped before reaching any Unity sink.
+#[unsafe(no_mangle)]
+pub extern "C" fn uuav_set_log_level(level: c_int) {
+    unsafe { ff::av_log_set_level(level) };
+}
+
 /// Initializes the global runtime.
 ///
 /// `protocol_whitelist` is a NUL-terminated, comma-separated FFmpeg protocol
 /// list; init fails if it is null or empty. Recommended baseline is
 /// `https,http,tls,tcp,crypto,data,udp,rtp,rtcp,rtsp`, adding `file` only for
 /// editor/local playback.
+///
+/// `warning_callback` and `log_callback` receive FFmpeg's own diagnostics
+/// (already formatted, one line per call); `log_level` is the initial
+/// `AV_LOG_*` verbosity threshold. All three callbacks must be non-null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uuav_init(
     texture: *const c_void,
     audio_options: AudioOptionsRaw,
     error_callback: Option<RawErrorCallback>,
+    warning_callback: Option<RawLogCallback>,
+    log_callback: Option<RawLogCallback>,
     protocol_whitelist: *const c_char,
+    log_level: c_int,
 ) -> ResultFFI {
     if INIT_STATE.load().is_some() {
         return ResultFFI::error("Already initialized");
@@ -377,6 +458,14 @@ pub unsafe extern "C" fn uuav_init(
 
     let Some(error_callback) = error_callback else {
         return ResultFFI::error("Error callback is null");
+    };
+
+    let Some(warning_callback) = warning_callback else {
+        return ResultFFI::error("Warning callback is null");
+    };
+
+    let Some(log_callback) = log_callback else {
+        return ResultFFI::error("Log callback is null");
     };
 
     if texture.is_null() {
@@ -401,12 +490,21 @@ pub unsafe extern "C" fn uuav_init(
     let new_runtime = Runtime {
         device,
         error_callback: Arc::new(error_callback),
+        warning_callback: Arc::new(warning_callback),
+        log_callback: Arc::new(log_callback),
         audio_options: Arc::new(ArcSwap::new(Arc::new(audio_options))),
         protocol_whitelist: Arc::new(protocol_whitelist),
         registry: DashMap::new(),
     };
 
     INIT_STATE.store(Some(Arc::new(new_runtime)));
+
+    // Register the trampoline once; the sinks live in INIT_STATE, so it no-ops
+    // after deinit and picks up fresh callbacks on re-init. The level store is
+    // process-global, so re-apply it every init.
+    LOG_INIT.call_once(|| unsafe { ff::av_log_set_callback(Some(uuav_ffmpeg_log)) });
+    unsafe { ff::av_log_set_level(log_level) };
+
     ResultFFI::ok()
 }
 
