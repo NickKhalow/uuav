@@ -417,7 +417,10 @@ namespace UUAV
                 }
 
                 // BGRA8 group so the surface is Graphics.CopyTexture-compatible with
-                // BGRA render targets (the D3D11 output format of most video pipelines)
+                // BGRA render targets (the D3D11 output format of most video pipelines).
+                // Default read/write leaves the surface sRGB-flagged in Linear projects;
+                // CopyTexture destinations must be sRGB-flagged too, or the raw bit copy
+                // transplants gamma bytes that get sampled as linear (too bright)
                 runtimeSurface = new RenderTexture(width, height, 0, RenderTextureFormat.BGRA32);
             }
 
@@ -435,7 +438,14 @@ namespace UUAV
 
             nv12Material.SetTexture(YTexId, yPlane);
             nv12Material.SetTexture(UVTexId, uvPlane);
+
+            // script-context blits inherit whatever sRGB-write state the last
+            // render left behind; without the encode the shader's linear output
+            // lands raw in the sRGB surface and decodes too dark
+            bool previousSRGBWrite = GL.sRGBWrite;
+            GL.sRGBWrite = QualitySettings.activeColorSpace == ColorSpace.Linear;
             Graphics.Blit(null, surface, nv12Material);
+            GL.sRGBWrite = previousSRGBWrite;
         }
 
         private void ReleasePlaneViews()
