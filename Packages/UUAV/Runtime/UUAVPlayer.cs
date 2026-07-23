@@ -416,7 +416,9 @@ namespace UUAV
                     Destroy(runtimeSurface);
                 }
 
-                runtimeSurface = new RenderTexture(width, height, 0, RenderTextureFormat.ARGB32);
+                // BGRA8 group so the surface is Graphics.CopyTexture-compatible with
+                // BGRA render targets (the D3D11 output format of most video pipelines)
+                runtimeSurface = new RenderTexture(width, height, 0, RenderTextureFormat.BGRA32);
             }
 
             nativeTexture = texture;
